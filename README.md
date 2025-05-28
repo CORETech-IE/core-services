@@ -1,2 +1,4 @@
+// README.md
 # core-services
-CORE Services running in the Clients
+
+Minimal standalone service container for executing independent business functions (PDF generation, ZPL creation, email delivery).
