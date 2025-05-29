@@ -3,12 +3,30 @@ import { generateZPL } from './generate';
 
 const router = express.Router();
 
-router.post('/', async (req, res) => {
+/**
+ * POST /zpl
+ * Accepts JSON with core_report_info and other dynamic data.
+ * Returns a generated ZPL string as a plain text file.
+ */
+router.post('/', async (req, res, next) => {
   try {
-    const zpl = await generateZPL(req.body);
-    res.type('text/plain').send(zpl);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to generate ZPL' });
+    const data = req.body;
+
+    if (!data?.core_report_info) {
+      return res.status(400).json({ message: 'Missing core_report_info block' });
+    }
+
+    const zpl = await generateZPL(data);
+
+    res.set({
+      'Content-Type': 'text/plain',
+      'Content-Disposition': 'attachment; filename=etiquetas.zpl.txt',
+      'Content-Length': Buffer.byteLength(zpl),
+    });
+
+    return res.end(zpl);
+  } catch (error) {
+    return next(error);
   }
 });
 
