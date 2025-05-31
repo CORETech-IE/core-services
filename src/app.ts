@@ -16,6 +16,12 @@ import zplRoutes from './services/zpl/routes';
 import emailRoutes from './services/email/routes';
 import authRoutes from './routes/authRoutes';
 import { initializeBrowserPool } from './config/browserPool';
+import { validateConfig } from './config/config-validator';
+
+// Validate configuration before starting the server
+// This ensures all required environment variables are set
+// and the application is ready to run
+validateConfig();
 
 // Initialize the browser pool for Puppeteer
 // This is necessary to ensure that the browser instances are ready for use
@@ -29,7 +35,10 @@ dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 const app = express();
 
-const PORT = process.env.PORT || 3000;
+console.log('Environment Variables Loaded:');
+console.log(`SERVICES_PORT: ${process.env.SERVICES_PORT}`);
+const PORT = process.env.SERVICES_PORT;
+
 
 app.use('/img', express.static(path.resolve(__dirname, '../../reports_templates/img')));
 

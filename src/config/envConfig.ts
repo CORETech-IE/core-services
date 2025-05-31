@@ -1,6 +1,14 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
+
+// src/config/envConfig.ts
+// Importing environment variables and setting up configuration for the application
+// This file is responsible for loading environment variables and constructing the configuration object
+
+const coreApiHost = process.env.CORE_API_HOST;
+const backendPort = process.env.BACKEND_PORT;
+
 const envConfig = {
   senderEmail: process.env.SENDER_EMAIL || '',
   clientId: process.env.CLIENT_ID || '',
@@ -11,14 +19,12 @@ const envConfig = {
   tokenEndpoint: 'https://login.microsoftonline.com', 
   jwtSecret: process.env.JWT_SECRET || '',
   internalJwtSecret: process.env.INTERNAL_JWT_SECRET || '',
-  pg: {
-    host: process.env.PGHOST || 'localhost',
-    database: process.env.PGDATABASE || '',
-    user: process.env.PGUSER || '',
-    password: process.env.PGPASSWORD || '',
-    port: Number(process.env.PGPORT) || 5432
-  },
-  logApiKey: process.env.LOG_API_KEY || ''
+  authUsername: process.env.AUTH_USERNAME,
+  authPassword: process.env.AUTH_PASSWORD,
+  authUrl: `${coreApiHost}:${backendPort}${process.env.AUTH_URL}`, // URL for the authentication service
+  apiUrl: `${coreApiHost}:${backendPort}${process.env.BACKEND_URL}`, // Base URL for the API 
 };
 
 export default envConfig;
+
+
