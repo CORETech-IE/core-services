@@ -1,6 +1,5 @@
 import express from 'express';
 import helmet from 'helmet';
-import dotenv from 'dotenv';
 import path from 'path';
 import {
   authenticateJWT,
@@ -17,6 +16,7 @@ import emailRoutes from './services/email/routes';
 import authRoutes from './routes/authRoutes';
 import { initializeBrowserPool } from './config/browserPool';
 import { validateConfig } from './config/config-validator';
+import envConfig from './config/envConfig';
 
 // Validate configuration before starting the server
 // This ensures all required environment variables are set
@@ -30,14 +30,11 @@ validateConfig();
   await initializeBrowserPool(); 
 })();
 
-dotenv.config({ path: path.resolve(__dirname, '../.env') });
-
-
 const app = express();
 
 console.log('Environment Variables Loaded:');
-console.log(`SERVICES_PORT: ${process.env.SERVICES_PORT}`);
-const PORT = process.env.SERVICES_PORT;
+console.log(`servicesPort: ${envConfig.servicesPort}`);
+const PORT = envConfig.servicesPort;
 
 
 app.use('/img', express.static(path.resolve(__dirname, '../../reports_templates/img')));
