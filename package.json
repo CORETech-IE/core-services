@@ -5,8 +5,8 @@
     "main": "dist/app.js",
     "scripts": {
         "build": "tsc",
-        "start": "node dist/app.js",
-        "dev": "ts-node src/app.ts"
+        "dev": "ts-node src/scripts/dev.ts",
+        "start": "ts-node src/app.ts"
     },
     "repository": {
         "type": "git",
@@ -29,6 +29,7 @@
         "express-rate-limit": "^7.5.0",
         "helmet": "^8.1.0",
         "html-pdf": "^3.0.1",
+        "js-yaml": "^4.1.0",
         "jsonwebtoken": "^9.0.2",
         "mqtt": "^5.13.0",
         "mustache": "^4.2.0",
@@ -48,6 +49,7 @@
         "@types/bcrypt": "^5.0.2",
         "@types/express": "^4.17.17",
         "@types/html-pdf": "^3.0.0",
+        "@types/js-yaml": "^4.0.9",
         "@types/jsonwebtoken": "^9.0.9",
         "@types/mustache": "^4.2.5",
         "@types/node": "^20.0.0",

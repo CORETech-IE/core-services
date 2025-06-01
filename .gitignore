@@ -134,3 +134,14 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+
+# SOPS decrypted temp files
+*.tmp.yaml
+
+# Windows-specific
+Thumbs.db
+Desktop.ini
+
+# Evita subir ningún archivo con "secret" o "token" en el nombre
+*secret*
+*token*
