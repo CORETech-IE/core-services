@@ -57,6 +57,11 @@ app.use('/email', emailInternalRoutes);
 // Public Email Routes
 app.use('/api/email', emailPublicRoutes);
 
+// test
+app.get('/health', (_, res) => {
+  res.status(200).send('OK');
+});
+
 // Error global
 app.use(errorHandler);
 

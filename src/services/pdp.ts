@@ -33,7 +33,7 @@ export const evaluatePolicy = (attributes: PDPAttributes): PDPDecision => {
   // Simulación: consentimientos válidos (dummy)
   const mockConsentDatabase = new Map<string, { hash: string; expiresAt: string; subject: string }>([
     ['token-gdpr-hash08a0', {
-        hash: '2033748d2d308f33a1350741264822a5a2e62f2747681193f8674abd0c861720',
+        hash: 'fa9c54db45323aa107b594152b4a9a58a62d45c1dfb33eabd07aa40dcbccc275',
         expiresAt: '2099-12-31T23:59:59.000Z',
         subject: 'alejandro.prado@coretechnology.ie'
       }]

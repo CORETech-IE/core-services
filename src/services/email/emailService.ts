@@ -5,6 +5,7 @@ import { config } from '../../config/config';
 import envConfig from '../../config/envConfig';
 import { getAccessToken } from './tokenService';
 import { logger } from '../../utils/logger';
+import { signPDF } from '../../utils/pdfSigner';
 
 export interface EmailAttachment {
   name: string;
@@ -16,13 +17,44 @@ export interface EmailParams {
   to: string;
   subject: string;
   body: string;
-  attachments?: EmailAttachment[]; // Ahora: array de objetos { name, path }
+  attachments?: EmailAttachment[];
 }
 
 export async function sendEmail(
   { from, to, subject, body, attachments = [] }: EmailParams,
   trace_id: string
 ): Promise<number> {
+  const signedAttachments: EmailAttachment[] = [];
+
+  for (const attachment of attachments) {
+    if (attachment.name.endsWith('_signed.pdf')) {
+      signedAttachments.push(attachment);
+      continue;
+    }
+
+    const signedName = attachment.name.replace(/\.pdf$/, '_signed.pdf');
+    const signedPath = attachment.path.replace(/\.pdf$/, '_signed.pdf');
+
+    logger.info('🖋️ Signing PDF', {
+      trace_id,
+      original: attachment.path,
+      signed: signedPath
+    });
+
+    await signPDF({
+      pdfPath: attachment.path,
+      outputPath: signedPath,
+      certPath: envConfig.certPath,
+      certPassword: envConfig.certPassword || '',
+      type: envConfig.certType as 'p12' | 'pem'
+    });
+
+    signedAttachments.push({
+      name: signedName,
+      path: signedPath
+    });
+  }
+
   const emailPayload: any = {
     message: {
       subject,
@@ -41,10 +73,9 @@ export async function sendEmail(
     saveToSentItems: true
   };
 
-  // Optional file attachments
-  if (attachments.length > 0) {
+  if (signedAttachments.length > 0) {
     emailPayload.message.attachments = await Promise.all(
-      attachments.map(async ({ path: filePath, name }) => {
+      signedAttachments.map(async ({ path: filePath, name }) => {
         const contentBytes = await fs.readFile(filePath).then(b =>
           b.toString('base64')
         );
@@ -59,7 +90,7 @@ export async function sendEmail(
           '@odata.type': '#microsoft.graph.fileAttachment',
           name,
           contentBytes,
-          contentType: 'application/octet-stream'
+          contentType: 'application/pdf'
         };
       })
     );
