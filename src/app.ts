@@ -12,7 +12,8 @@ import {
 
 import pdfRoutes from './services/pdf/routes';
 import zplRoutes from './services/zpl/routes';
-import emailRoutes from './services/email/routes';
+import emailInternalRoutes from './services/email/internalRoutes';
+import emailPublicRoutes from './services/email/publicRoutes';
 import authRoutes from './routes/authRoutes';
 import { initializeBrowserPool } from './config/browserPool';
 import { validateConfig } from './config/config-validator';
@@ -51,7 +52,10 @@ app.use('/auth', authRoutes);
 // PDF, ZPL, Email
 app.use('/pdf', authenticateJWT, authorizeAdmin, pdfRoutes);
 app.use('/zpl', authenticateJWT, authorizeAdmin, zplRoutes);
-app.use('/email', authenticateJWT, authorizeAdmin, emailRoutes);
+app.use('/email', emailInternalRoutes);
+
+// Public Email Routes
+app.use('/api/email', emailPublicRoutes);
 
 // Error global
 app.use(errorHandler);

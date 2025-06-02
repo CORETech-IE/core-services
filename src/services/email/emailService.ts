@@ -3,23 +3,26 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { config } from '../../config/config';
 import envConfig from '../../config/envConfig';
-import { getAccessToken } from '../../services/email/tokenService';
+import { getAccessToken } from './tokenService';
+import { logger } from '../../utils/logger';
+
+export interface EmailAttachment {
+  name: string;
+  path: string;
+}
 
 export interface EmailParams {
   from?: string;
   to: string;
   subject: string;
   body: string;
-  attachments?: string[]; // Absolute paths to files
+  attachments?: EmailAttachment[]; // Ahora: array de objetos { name, path }
 }
 
-export async function sendEmail({
-  from,
-  to,
-  subject,
-  body,
-  attachments = []
-}: EmailParams): Promise<number> {
+export async function sendEmail(
+  { from, to, subject, body, attachments = [] }: EmailParams,
+  trace_id: string
+): Promise<number> {
   const emailPayload: any = {
     message: {
       subject,
@@ -41,19 +44,20 @@ export async function sendEmail({
   // Optional file attachments
   if (attachments.length > 0) {
     emailPayload.message.attachments = await Promise.all(
-      attachments.map(async (filePath) => {
+      attachments.map(async ({ path: filePath, name }) => {
         const contentBytes = await fs.readFile(filePath).then(b =>
           b.toString('base64')
         );
 
-        console.log('[core-services] 📎 Attaching file:', {
-          name: path.basename(filePath),
+        logger.info('📎 Attaching file', {
+          trace_id,
+          name,
           size: contentBytes.length
         });
 
         return {
           '@odata.type': '#microsoft.graph.fileAttachment',
-          name: path.basename(filePath),
+          name,
           contentBytes,
           contentType: 'application/octet-stream'
         };
@@ -62,7 +66,6 @@ export async function sendEmail({
   }
 
   const accessToken = await getAccessToken();
-
   const sender = from || envConfig.senderEmail;
 
   const response = await axios.post(
@@ -76,6 +79,12 @@ export async function sendEmail({
     }
   );
 
-  console.log(`[core-services] Email sent successfully to: ${to}`);
+  logger.info('Email sent successfully', {
+    trace_id,
+    to,
+    sender,
+    status: response.status
+  });
+
   return response.status;
 }
