@@ -44,9 +44,9 @@ export async function sendEmail(
     await signPDF({
       pdfPath: attachment.path,
       outputPath: signedPath,
-      certPath: envConfig.certPath,
-      certPassword: envConfig.certPassword || '',
-      type: envConfig.certType as 'p12' | 'pem'
+      certPath: envConfig.certPdfSignPath,
+      certPassword: envConfig.certPdfSignPassword || '',
+      type: envConfig.certPdfSignType as 'p12' | 'pem'
     });
 
     signedAttachments.push({

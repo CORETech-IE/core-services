@@ -56,6 +56,9 @@ const envConfig = {
   backendUrl: yamlConfig.backendUrl ?? '',
   apiUrl: `${yamlConfig.coreApiHost}:${yamlConfig.servicesPort}${yamlConfig.backendUrl}`,
   authFullUrl: `${yamlConfig.coreApiHost}:${yamlConfig.servicesPort}${yamlConfig.authUrl}`,
+  certPdfSignType: yamlConfig.certPdfSignType ?? 'p12', // Default to 'p12' if not specified
+  certPdfSignPath: process.env.cert_pdf_sign_HASHpath ?? yamlConfig.certPdfSignPath ?? '',
+  certPdfSignPassword: process.env.cert_pdf_sign_password ?? yamlConfig.certPdfSignPassword ?? '',
 };
 
 

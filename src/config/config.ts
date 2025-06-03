@@ -62,6 +62,11 @@ export const config = {
     tenantClientId: process.env.TENANT_CLIENT_ID || '',
     tokenEndpoint: process.env.TOKEN_ENDPOINT || 'https://login.microsoftonline.com'
   },
+  cert: {
+    certPdfSignType: process.env.CERT_PDF_SIGN_TYPE || 'p12', 
+    certPdfSignPassword: process.env.CERT_PDF_SIGN_PASSWORD, 
+    certPdfSignPath: process.env.CERT_PDF_SIGN_PATH , 
+  },
   client: clientId,
   raw: clientConfig
 };
