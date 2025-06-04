@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
 import rawUsers from '../config/users.json';
+import { getServiceContainer } from '../services/serviceContainer';
 
 // Define the shape of each user record
 interface UserRecord {
@@ -11,9 +12,6 @@ interface UserRecord {
 
 // Apply type to the users object
 const users: Record<string, UserRecord> = rawUsers;
-
-// Load JWT secret from environment
-const SECRET = process.env.JWT_SECRET || 'default_secret_dangerous';
 
 export const login = async (req: Request, res: Response) => {
   const { username, password } = req.body;
@@ -36,9 +34,19 @@ export const login = async (req: Request, res: Response) => {
     return res.status(401).json({ error: 'Invalid credentials' });
   }
 
-  // Generate JWT token with role
-  const token = jwt.sign({ username, role: user.role }, SECRET, { expiresIn: '15m' });
+  try {
+    // Get JWT secret from service container (works in both modes)
+    const container = getServiceContainer();
+    const jwtSecret = container.getJwtSecret();
 
-  // Return the token to the client
-  res.json({ token });
+    // Generate JWT token with role using the same secret as middleware
+    const token = jwt.sign({ username, role: user.role }, jwtSecret, { expiresIn: '15m' });
+
+    // Return the token to the client
+    res.json({ token });
+    
+  } catch (error) {
+    console.error('Failed to generate JWT token:', error);
+    return res.status(500).json({ error: 'Failed to generate authentication token' });
+  }
 };

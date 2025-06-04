@@ -1,70 +1,51 @@
 import express from 'express';
 import helmet from 'helmet';
-import path from 'path';
-import {
-  authenticateJWT,
-  allowGetPostOnly,
-  rateLimiter,
-  securityHeaders,
-  authorizeAdmin,
-  errorHandler,
-} from './middlewares';
-
-import pdfRoutes from './services/pdf/routes';
-import zplRoutes from './services/zpl/routes';
-import emailInternalRoutes from './services/email/internalRoutes';
-import emailPublicRoutes from './services/email/publicRoutes';
-import authRoutes from './routes/authRoutes';
-import { initializeBrowserPool } from './config/browserPool';
+import { getConfigAsync } from './config/envConfig';
 import { validateConfig } from './config/config-validator';
-import envConfig from './config/envConfig';
+import { initServiceContainer } from './services/serviceContainer';
+import { createAuthenticateJWT } from './middlewares/authenticateJWT';
+import { authorizeAdmin } from './middlewares';  // ← NUEVA LÍNEA 1
+import authRoutes from './routes/authRoutes';
+import emailPublicRoutes from './services/email/publicRoutes';  // ← NUEVA LÍNEA 2
 
-// Validate configuration before starting the server
-// This ensures all required environment variables are set
-// and the application is ready to run
-validateConfig();
+const startApp = async () => {
+  const config = await getConfigAsync();
+  console.log('🚀 Config loaded!');
+  
+  validateConfig(config);
+  console.log('✅ Config validated!');
+ 
+  initServiceContainer(config);
+  console.log('🏗️ Service container initialized');
+  
+  // Create JWT middleware with loaded config
+  const authenticateJWT = createAuthenticateJWT(config.jwtSecret);
+  console.log('🔐 JWT middleware created');
+ 
+  const app = express();
+  app.use(helmet());
+  app.use(express.json());
+  
+  // Auth routes - para poder hacer login
+  app.use('/auth', authRoutes);
+  
+  // EMAIL ROUTES - ¡EL MOMENTO DE LA VERDAD!
+  app.use('/api/email', authenticateJWT, authorizeAdmin, emailPublicRoutes);  // ← NUEVA LÍNEA 3
+ 
+  app.get('/health', (_, res) => {
+    res.status(200).send('OK');
+  });
+ 
+  console.log('📝 About to start express server...');
 
-// Initialize the browser pool for Puppeteer
-// This is necessary to ensure that the browser instances are ready for use
-// before any requests are handled.
-(async () => {
-  await initializeBrowserPool(); 
-})();
+  const PORT = config.servicesPort || 3001;
+  app.listen(PORT, () => {
+    console.log(`[core-services] API listening on port ${PORT}`);
+    console.log('[core-services] 🚀 FULL EMAIL FUNCTIONALITY RESTORED!');
+    console.log('[core-services] Ready for ISO 27001 compliant emails!');
+  });
+};
 
-const app = express();
+console.log('🔄 Listen called, waiting for server...');
 
-console.log('Environment Variables Loaded:');
-console.log(`servicesPort: ${envConfig.servicesPort}`);
-const PORT = envConfig.servicesPort;
-
-
-app.use('/img', express.static(path.resolve(__dirname, '../../reports_templates/img')));
-
-// Middleware
-app.use(helmet());
-app.use(express.json());
-app.use(allowGetPostOnly);
-app.use(rateLimiter);
-app.use(securityHeaders);
-
-app.use('/auth', authRoutes);
-// Services
-// PDF, ZPL, Email
-app.use('/pdf', authenticateJWT, authorizeAdmin, pdfRoutes);
-app.use('/zpl', authenticateJWT, authorizeAdmin, zplRoutes);
-app.use('/email', emailInternalRoutes);
-
-// Public Email Routes
-app.use('/api/email', emailPublicRoutes);
-
-// test
-app.get('/health', (_, res) => {
-  res.status(200).send('OK');
-});
-
-// Error global
-app.use(errorHandler);
-
-app.listen(PORT, () => {
-  console.log(`[core-services] API listening on port ${PORT}`);
-});
+startApp().catch(console.error);

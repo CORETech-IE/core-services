@@ -1,6 +1,6 @@
 import fs from 'fs';
 import { plainAddPlaceholder } from 'node-signpdf';
-import envConfig from '../config/envConfig';
+
 const { SignPdf } = require('node-signpdf');
 
 interface SignPDFOptions {
@@ -14,10 +14,16 @@ interface SignPDFOptions {
 export async function signPDF({
   pdfPath,
   outputPath,
-  certPath = envConfig.certPdfSignPath,
-  certPassword = envConfig.certPdfSignPassword,
+  certPath,
+  certPassword = '',
   type
 }: SignPDFOptions): Promise<void> {
+  
+  // Validate required parameters
+  if (!certPath) {
+    throw new Error('Certificate path is required for PDF signing');
+  }
+
   const pdfBuffer = fs.readFileSync(pdfPath);
   const pdfWithPlaceholder = plainAddPlaceholder({
     pdfBuffer,
@@ -29,10 +35,9 @@ export async function signPDF({
   if (type === 'p12') {
     const p12Buffer = fs.readFileSync(certPath);
     
-    // We are using the SignPdf class from node-signpdf on version 3.0.0 or later, which supports signing with P12 certificates.
     const signedPdf = signer.sign(pdfWithPlaceholder, p12Buffer, {
       passphrase: certPassword,
-      timestampURL: 'http://timestamp.digicert.com' // Optional: You can specify a timestamp URL. This is a common practice for PDF signing.
+      timestampURL: 'http://timestamp.digicert.com'
     });
     
     fs.writeFileSync(outputPath, signedPdf);
@@ -47,13 +52,13 @@ export async function signPDF({
     if (!certMatch || !keyMatch) {
       throw new Error('Invalid PEM file: certificate or key not found');
     }
-
+    
     const certificate = Buffer.from(certMatch[0]);
     const key = Buffer.from(keyMatch[0]);
     
-    const signedPdf = signer.sign(pdfWithPlaceholder, { 
-      key, 
-      cert: certificate 
+    const signedPdf = signer.sign(pdfWithPlaceholder, {
+      key,
+      cert: certificate
     });
     
     fs.writeFileSync(outputPath, signedPdf);

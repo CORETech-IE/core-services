@@ -5,5 +5,5 @@ export { validateBody } from './validateBody';
 export { securityHeaders } from './securityHeaders';
 export { errorHandler } from './errorHandler';
 export { allowGetPostOnly } from './allowGetPostOnly';
-export { authenticateJWT } from './authenticateJWT';
+export { createAuthenticateJWT } from './authenticateJWT';
 export { authorizeAdmin } from './authorizeAdmin';
