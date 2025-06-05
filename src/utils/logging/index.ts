@@ -180,7 +180,10 @@ class TempMetricsCollector implements IMetricsCollector {
   constructor(config: any, dailyStats: TempDailyStatsCollector) {
     this.dailyStats = dailyStats;
     this.metricsLogger = createLogger({
-      level: 'info',
+      levels: {
+        ERROR: 0, WARN: 1, INFO: 2, DEBUG: 3
+      },
+      level: 'INFO',
       format: format.combine(
         format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss.SSS' }),
         format.printf((info) => JSON.stringify(info))
@@ -192,7 +195,7 @@ class TempMetricsCollector implements IMetricsCollector {
           zippedArchive: true,
           maxSize: '25m',
           maxFiles: '30d',
-          level: 'info'
+          level: 'INFO'
         })
       ],
       exitOnError: false
@@ -251,7 +254,7 @@ class TempMetricsCollector implements IMetricsCollector {
     
     // Human-friendly version for log file
     const humanMetrics = createDetailedHumanMetrics(metrics);
-    this.metricsLogger.info('SYSTEM_METRICS', humanMetrics);
+    this.metricsLogger.log('INFO', 'SYSTEM_METRICS', humanMetrics);
     
     // Update daily stats with performance data
     const memoryMB = Math.round(metrics.memory.heapUsed / 1024 / 1024);
@@ -418,11 +421,42 @@ class TempEnhancedLogger extends CoreServicesLogger implements IEnhancedLogger {
   }
 }
 
-// Create the Winston logger
+// Create the Winston logger with custom levels
 const createWinstonLogger = (): Logger => {
   const config = createLoggerConfig();
   
+  // Define custom levels for Winston (UPPERCASE)
+  const customLevels = {
+    levels: {
+      ERROR: 0,
+      FATAL: 0,
+      CRITICAL: 0,
+      ALERT: 0,
+      EMERGENCY: 0,
+      WARN: 1,
+      AUDIT: 1,
+      INFO: 2,
+      NOTICE: 2,
+      DEBUG: 3,
+      TRACE: 4
+    },
+    colors: {
+      ERROR: 'red',
+      FATAL: 'red', 
+      CRITICAL: 'red',
+      ALERT: 'red',
+      EMERGENCY: 'red',
+      WARN: 'yellow',
+      AUDIT: 'yellow',
+      INFO: 'green',
+      NOTICE: 'green', 
+      DEBUG: 'blue',
+      TRACE: 'blue'
+    }
+  };
+  
   return createLogger({
+    levels: customLevels.levels,  // ← AÑADIR ESTO
     level: config.level,
     format: format.combine(
       format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss.SSS' }),
@@ -435,7 +469,7 @@ const createWinstonLogger = (): Logger => {
         level: config.level,
         format: format.combine(
           format.colorize({
-            colors: { debug: 'blue', info: 'green', warn: 'yellow', error: 'red' }
+            colors: customLevels.colors  // ← CAMBIAR ESTO
           }),
           format.timestamp({ format: 'HH:mm:ss.SSS' }),
           createConsoleFormat()
@@ -447,7 +481,7 @@ const createWinstonLogger = (): Logger => {
         zippedArchive: true,
         maxSize: '50m',
         maxFiles: '14d',
-        level: 'info'
+        level: 'INFO'  // ← CAMBIAR A MAYÚSCULAS
       }),
       new DailyRotateFile({
         filename: path.join(config.logsDirectory, 'core-services-error-%DATE%.log'),
@@ -455,7 +489,7 @@ const createWinstonLogger = (): Logger => {
         zippedArchive: true,
         maxSize: '25m',
         maxFiles: '30d',
-        level: 'error'
+        level: 'ERROR'  // ← CAMBIAR A MAYÚSCULAS
       })
     ],
     exceptionHandlers: [
