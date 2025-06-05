@@ -39,8 +39,8 @@ const startApp = async () => {
   app.use("/api/email", authenticateJWT, authorizeAdmin, emailPublicRoutes); // ← NUEVA LÍNEA 3
 
   // Public routes for pdf and zpl services
-  app.use("/pdf", authenticateJWT, authorizeAdmin, pdfRoutes);
-  app.use("/zpl", authenticateJWT, authorizeAdmin, zplRoutes);
+  app.use("/generate-pdf", authenticateJWT, authorizeAdmin, pdfRoutes);
+  app.use("/generate-zpl", authenticateJWT, authorizeAdmin, zplRoutes);
 
   app.get("/health", (_, res) => {
     res.status(200).send("OK");
