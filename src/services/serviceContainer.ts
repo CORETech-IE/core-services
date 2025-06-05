@@ -1,9 +1,9 @@
 // src/services/serviceContainer.ts
-
 import { EmailServiceConfig } from './email/emailService';
 import { TokenServiceConfig } from './email/tokenService';
 import { PdfSigningConfig } from '../types/pdfTypes';
 import { AuthConfig } from '../utils/getToken';
+import { initializeBrowserPool } from '../config/browserPool';
 
 /**
  * Service Container for Dependency Injection
@@ -91,8 +91,13 @@ let serviceContainer: ServiceContainer | null = null;
  * Initialize the service container with app configuration
  * Should be called once during app startup
  */
-export function initServiceContainer(appConfig: any): ServiceContainer {
+export async function initServiceContainer(appConfig: any): Promise<ServiceContainer> {
   serviceContainer = new ServiceContainer(appConfig);
+  
+  // Inicializar browser pool también
+  await initializeBrowserPool();
+  console.log('🌐 Browser pool initialized');
+ 
   return serviceContainer;
 }
 

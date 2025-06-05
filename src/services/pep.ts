@@ -1,9 +1,8 @@
 // src/services/pep.ts
-
 import { evaluatePolicy, PDPAttributes } from './pdp';
 import { z } from 'zod';
 import { createHash } from 'crypto';
-import { logger } from '../utils/logger';
+import logger from '../utils/logging';
 
 const EmailPayloadSchema = z.object({
   to: z.string().email(),
@@ -23,11 +22,14 @@ export const enforceEmailPolicy = (
   payload: unknown,
   gdpr_token: string
 ): { allowed: boolean; reason: string; hash?: string } => {
+  
   // 1. Validación estricta del contenido
   const validation = EmailPayloadSchema.safeParse(payload);
   if (!validation.success) {
     logger.warn('Email payload failed schema validation', {
-      reason: validation.error.message
+      operation: 'EMAIL_OPERATION',
+      reason: validation.error.message,
+      validation_errors: validation.error.errors?.length || 0
     });
     return {
       allowed: false,
@@ -36,14 +38,30 @@ export const enforceEmailPolicy = (
   }
 
   const validated = validation.data;
-
-  console.log('Validated payload:', validated);
-  // Log the validated payload for debugging    
+  
+  // SECURE: Only log payload details in verbose mode
+  logger.debug('Email payload validated', {
+    operation: 'EMAIL_OPERATION',
+    recipient_domain: validated.to.split('@')[1],
+    subject_length: validated.subject.length,
+    body_length: validated.body.length,
+    attachments_count: validated.attachments?.length || 0,
+    attachment_names: validated.attachments?.map(a => a.name) || [],
+    // VERBOSE ONLY: Full payload for debugging
+    ...(logger.isVerbose() && {
+      verbose_validated_payload: validated
+    })
+  });
 
   // 2. Ordenar y hashear el payload de forma determinista
   const hash = generatePayloadHash(validated);
-
-  console.log('Payload hash:', hash);
+  
+  logger.debug('Payload hash generated', {
+    operation: 'EMAIL_OPERATION',
+    hash,
+    hash_algorithm: 'SHA-256',
+    payload_keys: Object.keys(validated)
+  });
 
   // 3. Atributos para PDP (modo estricto)
   const attributes: PDPAttributes = {
@@ -58,13 +76,21 @@ export const enforceEmailPolicy = (
   // 4. Consulta a PDP
   const decision = evaluatePolicy(attributes);
 
-  // 5. Logging estructurado
+  // 5. Logging estructurado con información de decisión
   logger.info('ABAC decision evaluated', {
+    operation: 'EMAIL_OPERATION',
     user_id: process.env.TENANT_CLIENT_ID,
     hash,
-    gdpr_token,
-    attributes,
-    decision
+    decision_allowed: decision.allow,
+    decision_reason: decision.reason,
+    gdpr_token_length: gdpr_token?.length || 0,
+    purpose: attributes.purpose,
+    // VERBOSE ONLY: Full decision details
+    ...(logger.isVerbose() && {
+      verbose_full_attributes: attributes,
+      verbose_full_decision: decision,
+      verbose_gdpr_token: gdpr_token
+    })
   });
 
   return {

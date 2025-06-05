@@ -4,7 +4,7 @@ import axios from 'axios';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { getAccessToken, TokenServiceConfig } from './tokenService';
-import { logger } from '../../utils/logger';
+import logger from '../../utils/logging';
 
 /**
  * Email Service - Pure Email Sending with Enhanced Security

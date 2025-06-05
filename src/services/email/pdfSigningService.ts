@@ -1,7 +1,7 @@
 // src/services/pdfSigningService.ts
 
 import { signPDF } from '../../utils/pdfSigner';
-import { logger } from '../../utils/logger';
+import logger from '../../utils/logging';
 import { getServiceContainer } from '../serviceContainer';
 import { EmailAttachment } from '../email/emailService';
 import { PdfSigningConfig } from '../../types/pdfTypes';

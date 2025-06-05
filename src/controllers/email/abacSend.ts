@@ -5,7 +5,7 @@ import { enforceEmailPolicy } from '../../services/pep';
 import { EmailParams } from '../../services/email/emailService';
 import { sendEmailWithConfig } from '../../services/email/emailServiceHelpers';
 import { signPDFAttachments, getSignedAttachments, validateSigningResults } from '../../services/email/pdfSigningService';
-import { logger } from '../../utils/logger';
+import logger from '../../utils/logging';
 import { v4 as uuidv4 } from 'uuid';
 import { ISO27001Classification, getSecurityControls } from '../../types/iso27001';
 
@@ -221,7 +221,7 @@ export const abacSend = async (
       iso_control: 'A.12.4.1'
     });
 
-    console.error('💥 ISO 27001 ABAC Send critical error:', err);
+    logger.debug('Critical error details', { trace_id, error_details: err });
 
     res.status(500).json({
       trace_id,
