@@ -4,10 +4,12 @@
     "description": "Minimal standalone service container for independent functions (PDF, ZPL, email).",
     "main": "dist/app.js",
     "scripts": {
-        "build": "tsc",
-        "dev": "ts-node src/scripts/dev.ts",
-        "start": "ts-node src/app.ts"
-    },
+    "dev": "ts-node src/scripts/dev.ts",
+    "start": "ts-node src/scripts/dev.ts", 
+    "start:standalone": "ts-node src/scripts/dev.ts --standalone",
+    "build": "tsc",
+    "start:prod": "node dist/scripts/dev.js"
+  },
     "repository": {
         "type": "git",
         "url": "https://github.com/CORETech-IE/core-services.git"
