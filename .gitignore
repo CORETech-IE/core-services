@@ -142,6 +142,13 @@ dist
 Thumbs.db
 Desktop.ini
 
-# Evita subir ningún archivo con "secret" o "token" en el nombre
-*secret*
-*token*
+# avoid committing sensitive files
+*secret*.yaml
+*secret*.json
+*token*.yaml
+*token*.json
+*.secret
+*.token
+# but allow these files to be committed
+!*TokenService.ts
+!*tokenService.ts
