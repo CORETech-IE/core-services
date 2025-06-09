@@ -36,11 +36,11 @@ const startApp = async () => {
   app.use("/auth", authRoutes);
 
   // EMAIL ROUTES - ¡EL MOMENTO DE LA VERDAD!
-  app.use("/api/email", authenticateJWT, authorizeAdmin, emailPublicRoutes); // ← NUEVA LÍNEA 3
+  app.use("/api/email", /*authenticateJWT, authorizeAdmin,*/ emailPublicRoutes); 
 
   // Public routes for pdf and zpl services
-  app.use("/generate-pdf", authenticateJWT, authorizeAdmin, pdfRoutes);
-  app.use("/generate-zpl", authenticateJWT, authorizeAdmin, zplRoutes);
+  app.use("/generate-pdf", /*authenticateJWT, authorizeAdmin,*/ pdfRoutes);
+  app.use("/generate-zpl", /*authenticateJWT, authorizeAdmin,*/ zplRoutes);
 
   app.get("/health", (_, res) => {
     res.status(200).send("OK");
