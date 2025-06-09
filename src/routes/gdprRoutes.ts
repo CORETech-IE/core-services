@@ -2,7 +2,7 @@
 
 import express from 'express';
 import { getGDPRService, GDPRTokenRequest } from '../services/gdpr/gdprTokenService';
-import { createHash } from 'crypto';
+import { generatePayloadHash } from '../utils/hashUtils';
 import { z } from 'zod';
 import logger from '../utils/logging';
 import { v4 as uuidv4 } from 'uuid';
@@ -30,30 +30,7 @@ const GDPRTokenRequestSchema = z.object({
   client_id: z.string().optional()
 });
 
-/**
- * Utility function to sort object keys recursively for consistent hashing
- */
-function sortObjectRecursively(obj: any): any {
-  if (Array.isArray(obj)) {
-    return obj.map(sortObjectRecursively);
-  } else if (obj !== null && typeof obj === 'object') {
-    return Object.keys(obj)
-      .sort()
-      .reduce((result: any, key) => {
-        result[key] = sortObjectRecursively(obj[key]);
-        return result;
-      }, {});
-  }
-  return obj;
-}
 
-/**
- * Generate payload hash consistently with PEP service
- */
-function generatePayloadHash(payload: any): string {
-  const canonicalJson = JSON.stringify(sortObjectRecursively(payload));
-  return createHash('sha256').update(canonicalJson).digest('hex');
-}
 
 /**
  * POST /gdpr/generate-token

@@ -2,8 +2,9 @@
 //import { evaluatePolicy, PDPAttributes } from './pdp';
 import { evaluatePolicy, PDPAttributes } from './pdp-production';
 import { z } from 'zod';
-import { createHash } from 'crypto';
+//import { createHash } from 'crypto';
 import logger from '../utils/logging';
+import { generatePayloadHash } from '../utils/hashUtils';
 
 const EmailPayloadSchema = z.object({
   to: z.string().email(),
@@ -101,11 +102,6 @@ export const enforceEmailPolicy = (
   };
 };
 
-// Función auxiliar para generar hash SHA-256 determinista
-function generatePayloadHash(data: object): string {
-  const canonicalJson = JSON.stringify(sortObjectRecursively(data));
-  return createHash('sha256').update(canonicalJson).digest('hex');
-}
 
 // Ordena las claves de objetos recursivamente
 function sortObjectRecursively(obj: any): any {
