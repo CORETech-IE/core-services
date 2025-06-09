@@ -223,10 +223,11 @@ export const abacSend = async (
 
     logger.debug('Critical error details', { trace_id, error_details: err });
 
+    // CAMBIAR ESTO:
     res.status(500).json({
       trace_id,
-      error: 'Failed to send email due to internal error',
-      details: 'Check logs for detailed error information',
+      error: (err as Error).message,  // REAL ERROR MESSAGE
+      details: `Check logs for trace_id: ${trace_id}`,  // Better for debugging
       iso_control: 'A.12.4.1'
     });
   }
