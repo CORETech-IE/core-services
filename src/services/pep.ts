@@ -1,5 +1,6 @@
 // src/services/pep.ts
-import { evaluatePolicy, PDPAttributes } from './pdp';
+//import { evaluatePolicy, PDPAttributes } from './pdp';
+import { evaluatePolicy, PDPAttributes } from './pdp-production';
 import { z } from 'zod';
 import { createHash } from 'crypto';
 import logger from '../utils/logging';
@@ -69,7 +70,7 @@ export const enforceEmailPolicy = (
     payload_hash: hash,
     subject: validated.to,
     purpose: 'email_notification',
-    expiration: undefined, // future: from consent registry
+    //expiration: undefined, // future: from consent registry
     user_id: process.env.TENANT_CLIENT_ID
   };
 

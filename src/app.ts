@@ -9,7 +9,9 @@ import authRoutes from "./routes/authRoutes";
 import emailPublicRoutes from "./services/email/publicRoutes";
 import pdfRoutes from "./services/pdf/routes";
 import zplRoutes from "./services/zpl/routes";
-import logger from './utils/logging';
+import logger from "./utils/logging";
+import gdprRoutes from "./routes/gdprRoutes";
+import { initGDPRService } from "./services/gdpr/gdprTokenService";
 
 const startApp = async () => {
   const config = await getConfigAsync();
@@ -20,6 +22,10 @@ const startApp = async () => {
 
   await initServiceContainer(config);
   console.log("🏗️ Service container initialized");
+
+  // Después de initServiceContainer:
+  initGDPRService();
+  console.log("🔐 GDPR service initialized");
 
   logger.startMetrics(30000); // Start metrics collection every 30 seconds
   console.log("📊 Metrics collection started");
@@ -36,7 +42,8 @@ const startApp = async () => {
   app.use("/auth", authRoutes);
 
   // EMAIL ROUTES - ¡EL MOMENTO DE LA VERDAD!
-  app.use("/api/email", /*authenticateJWT, authorizeAdmin,*/ emailPublicRoutes); 
+  app.use("/api/email", /*authenticateJWT, authorizeAdmin,*/ emailPublicRoutes);
+  app.use("/api/gdpr", gdprRoutes);
 
   // Public routes for pdf and zpl services
   app.use("/generate-pdf", /*authenticateJWT, authorizeAdmin,*/ pdfRoutes);
