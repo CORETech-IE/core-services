@@ -54,6 +54,8 @@ export interface EmailServiceConfig extends TokenServiceConfig {
  * @returns HTTP status code from Microsoft Graph API
  * @throws Error if email sending fails
  */
+// services/email/emailService.ts - MANEJO DE ERRORES MEJORADO
+
 export async function sendEmail(
   { 
     from, 
@@ -72,15 +74,16 @@ export async function sendEmail(
   logger.info('Starting ISO 27001 compliant email send process', {
     trace_id,
     to,
-    subject: subject.substring(0, 50), // Log truncated subject for privacy
+    from: from || 'using_config_default',
+    subject: subject.substring(0, 50),
     attachment_count: attachments.length,
     classification,
     importance,
     has_gdpr_token: !!gdpr_token,
-    iso_control: 'A.8.2.1' // Information classification
+    iso_control: 'A.8.2.1'
   });
 
-  // Build the Microsoft Graph email payload with enhanced security
+  // Build the Microsoft Graph email payload
   const emailPayload: any = {
     message: {
       subject,
@@ -95,9 +98,15 @@ export async function sendEmail(
           }
         }
       ],
-      // ISO 27001 compliant headers and properties
+      // Solo agregar 'from' al message si se proporciona
+      ...(from && {
+        from: {
+          emailAddress: {
+            address: from
+          }
+        }
+      }),
       importance,
-      // Custom headers for ISO 27001 compliance and audit trail
       internetMessageHeaders: buildISO27001SecurityHeaders(trace_id, classification, gdpr_token, attachments)
     },
     saveToSentItems: true
@@ -110,22 +119,23 @@ export async function sendEmail(
 
   // Get OAuth token for Microsoft Graph
   const accessToken = await getAccessToken(config);
-  const sender = from || config.senderEmail;
+  const authenticatedSender = config.senderEmail;
 
   logger.info('Sending ISO 27001 compliant email via Microsoft Graph API', {
     trace_id,
-    sender,
+    authenticated_sender: authenticatedSender,
+    message_from: from || 'config_default',
+    to,
     classification,
     importance,
     custom_headers_count: emailPayload.message.internetMessageHeaders.length,
-    api_endpoint: `https://graph.microsoft.com/v1.0/users/${sender}/sendMail`,
-    iso_control: 'A.13.2.1' // Information transfer
+    api_endpoint: `https://graph.microsoft.com/v1.0/users/${authenticatedSender}/sendMail`,
+    iso_control: 'A.13.2.1'
   });
 
   try {
-    // Send the email via Microsoft Graph API
     const response = await axios.post(
-      `https://graph.microsoft.com/v1.0/users/${sender}/sendMail`,
+      `https://graph.microsoft.com/v1.0/users/${authenticatedSender}/sendMail`,
       emailPayload,
       {
         headers: {
@@ -138,27 +148,87 @@ export async function sendEmail(
     logger.info('ISO 27001 compliant email sent successfully via Microsoft Graph', {
       trace_id,
       to,
-      sender,
+      authenticated_sender: authenticatedSender,
+      message_from: from || 'config_default',
       status_code: response.status,
       attachment_count: attachments.length,
       classification,
       importance,
-      iso_control: 'A.12.4.1' // Audit logging
+      iso_control: 'A.12.4.1'
     });
 
     return response.status;
 
-  } catch (error) {
+  } catch (error: any) {
+    // 🎯 MANEJO ESPECÍFICO DE ERRORES DE MICROSOFT GRAPH
+    const statusCode = error.response?.status;
+    const responseData = error.response?.data;
+    const graphError = responseData?.error;
+    
     logger.error('Failed to send enhanced email via Microsoft Graph', {
       trace_id,
       to,
-      sender,
-      error: (error as any).message,
-      status: (error as any).response?.status,
-      response_data: (error as any).response?.data
+      authenticated_sender: authenticatedSender,
+      message_from: from || 'config_default',
+      error: error.message,
+      status: statusCode,
+      graph_error_code: graphError?.code,
+      graph_error_message: graphError?.message,
+      response_data: responseData
     });
 
-    throw new Error(`Email sending failed: ${(error as Error).message}`);
+    // 🔥 CREAR ERRORES ESPECÍFICOS Y ÚTILES
+    let errorMessage = 'Email sending failed';
+    let errorDetails = '';
+    let userAction = '';
+
+    if (statusCode === 403) {
+      if (graphError?.code === 'Forbidden' || graphError?.message?.includes('Send on behalf')) {
+        errorMessage = 'Email sender not authorized';
+        errorDetails = `The email address '${from || authenticatedSender}' is not authorized to send emails through this system`;
+        userAction = from && from !== authenticatedSender 
+          ? `Either use '${authenticatedSender}' as sender or contact your administrator to authorize '${from}'`
+          : 'Contact your administrator to verify email sending permissions';
+      } else if (graphError?.message?.includes('permission') || graphError?.message?.includes('scope')) {
+        errorMessage = 'Insufficient email permissions';
+        errorDetails = 'The application does not have the required permissions to send emails';
+        userAction = 'Contact your administrator to grant the necessary Microsoft Graph email permissions';
+      } else {
+        errorMessage = 'Email access forbidden';
+        errorDetails = graphError?.message || 'Access to email service was denied';
+        userAction = 'Verify your email permissions with the system administrator';
+      }
+    } else if (statusCode === 401) {
+      errorMessage = 'Email service authentication failed';
+      errorDetails = 'The authentication token is invalid or expired';
+      userAction = 'The system will attempt to refresh the token automatically. If the problem persists, contact support';
+    } else if (statusCode === 400) {
+      errorMessage = 'Invalid email request';
+      errorDetails = graphError?.message || 'The email request contains invalid data';
+      userAction = 'Check your email parameters (recipient, subject, body) and try again';
+    } else if (statusCode === 429) {
+      errorMessage = 'Email service rate limit exceeded';
+      errorDetails = 'Too many emails have been sent in a short period';
+      userAction = 'Wait a few minutes before sending more emails';
+    } else if (statusCode >= 500) {
+      errorMessage = 'Email service temporarily unavailable';
+      errorDetails = 'Microsoft Graph service is experiencing issues';
+      userAction = 'Try again in a few minutes. If the problem persists, contact support';
+    } else {
+      errorMessage = 'Email sending failed';
+      errorDetails = graphError?.message || error.message || 'Unknown error occurred';
+      userAction = 'Check your email parameters and try again';
+    }
+
+    // 🚀 THROW ERROR CON INFORMACIÓN ESTRUCTURADA
+    const enhancedError = new Error(errorMessage);
+    (enhancedError as any).details = errorDetails;
+    (enhancedError as any).userAction = userAction;
+    (enhancedError as any).statusCode = statusCode;
+    (enhancedError as any).graphErrorCode = graphError?.code;
+    (enhancedError as any).traceId = trace_id;
+    
+    throw enhancedError;
   }
 }
 

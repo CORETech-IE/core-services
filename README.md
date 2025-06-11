@@ -118,7 +118,7 @@ cd C:/CORE/GitHub/core-services
 sops -d ../core-envs-private/clients/core-dev/secrets.sops.yaml > .env
 
 # Step 2: Run app
-npm run dev -- core-dev
+npm start -- core-dev --standalone --gpg-passphrase="thepass"
 ```
 
 That's it. You're running a secure, client-specific backend service.

@@ -152,3 +152,6 @@ Desktop.ini
 # but allow these files to be committed
 !*TokenService.ts
 !*tokenService.ts
+
+# 🚫 Project-specific ignores
+all_sources.txt
