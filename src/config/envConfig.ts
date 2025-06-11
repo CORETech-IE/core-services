@@ -31,7 +31,31 @@ const getConfigMode = (): 'standalone' | 'traditional' => {
     return 'standalone';
   }
   
-  const hasSOPS = fs.existsSync(path.join(__dirname, '../../tools/win64/sops.exe'));
+  // Check for SOPS binary (platform-specific)
+  let hasSOPS = false;
+  if (process.platform === 'win32') {
+    hasSOPS = fs.existsSync(path.join(__dirname, '../../tools/win64/sops.exe'));
+  } else {
+    // Linux: check multiple locations
+    const linuxSopsPaths = [
+      path.join(__dirname, '../../tools/linux/sops'),
+      path.join(__dirname, '../../tools/sops'),
+      '/usr/local/bin/sops',
+      '/usr/bin/sops'
+    ];
+    hasSOPS = linuxSopsPaths.some(p => fs.existsSync(p));
+    
+    // Also check if sops is in PATH
+    if (!hasSOPS) {
+      try {
+        execSync('which sops', { stdio: 'pipe' });
+        hasSOPS = true;
+      } catch {
+        // sops not in PATH
+      }
+    }
+  }
+  
   const hasEnv = fs.existsSync(path.join(__dirname, '../.env'));
   
   if (hasSOPS && !hasEnv) return 'standalone';
@@ -42,7 +66,7 @@ const getConfigMode = (): 'standalone' | 'traditional' => {
  * Get GPG passphrase from multiple sources with fallback
  */
 const getGPGPassphrase = (): string => {
-  // 1. Environment variable (highest priority for Windows Service)
+  // 1. Environment variable (highest priority)
   if (process.env.GPG_PASSPHRASE) {
     console.log('🔑 Using GPG passphrase from environment');
     return process.env.GPG_PASSPHRASE;
@@ -58,7 +82,6 @@ const getGPGPassphrase = (): string => {
   // 3. Windows Service Registry (for production)
   if (process.platform === 'win32' && process.env.NODE_ENV === 'production') {
     try {
-      // Try to read from Windows Registry where service stores secure config
       const regValue = execSync(
         'reg query "HKLM\\SOFTWARE\\CoreServices" /v GPGPassphrase 2>nul', 
         { encoding: 'utf8', timeout: 5000 }
@@ -78,7 +101,6 @@ const getGPGPassphrase = (): string => {
   if (fs.existsSync(securePassphraseFile)) {
     try {
       const encryptedPassphrase = fs.readFileSync(securePassphraseFile, 'utf8').trim();
-      // Simple base64 decode (you could use more sophisticated encryption)
       const passphrase = Buffer.from(encryptedPassphrase, 'base64').toString('utf8');
       console.log('🔑 Using GPG passphrase from secure file');
       return passphrase;
@@ -91,10 +113,177 @@ const getGPGPassphrase = (): string => {
 };
 
 /**
- * Simplified standalone config loading - use local repo, no git clone
+ * Get SOPS binary path based on platform
  */
+const getSopsPath = (envsRepoPath: string): string => {
+  if (process.platform === 'win32') {
+    const winPath = path.join(envsRepoPath, 'tools/win64/sops.exe');
+    if (!fs.existsSync(winPath)) {
+      throw new Error(`SOPS Windows binary not found at: ${winPath}`);
+    }
+    return winPath;
+  } else {
+    // Linux/Unix - try multiple locations
+    const linuxPaths = [
+      path.join(envsRepoPath, 'tools/linux/sops'),
+      path.join(envsRepoPath, 'tools/sops'),
+      '/usr/local/bin/sops',
+      '/usr/bin/sops',
+      'sops' // PATH lookup
+    ];
+    
+    for (const sopsPath of linuxPaths) {
+      try {
+        if (sopsPath === 'sops') {
+          execSync('which sops', { stdio: 'pipe' });
+          console.log(`🐧 Using SOPS from PATH`);
+          return 'sops';
+        } else if (fs.existsSync(sopsPath)) {
+          // Make sure it's executable
+          try {
+            fs.chmodSync(sopsPath, 0o755);
+          } catch (chmodError) {
+            console.warn(`⚠️ Could not set executable permissions on ${sopsPath}`);
+          }
+          console.log(`🐧 Using SOPS binary: ${sopsPath}`);
+          return sopsPath;
+        }
+      } catch (error) {
+        continue;
+      }
+    }
+    
+    throw new Error(`SOPS binary not found. Install with: curl -LO https://github.com/mozilla/sops/releases/download/v3.7.3/sops-v3.7.3.linux.amd64 && sudo mv sops-v3.7.3.linux.amd64 /usr/local/bin/sops && sudo chmod +x /usr/local/bin/sops`);
+  }
+};
+
 /**
- * Simplified standalone config loading - use local repo, no git clone
+ * Decrypt SOPS file with Windows-specific optimizations
+ */
+const decryptSopsWindows = (sopsPath: string, secretsPath: string, gpgPassphrase: string): string => {
+  console.log('🪟 Windows SOPS decryption with optimizations...');
+  
+  // Pre-cache GPG passphrase
+  try {
+    execSync(`echo test | gpg --sign --armor --batch --yes --passphrase "${gpgPassphrase}" --pinentry-mode loopback`, {
+      stdio: 'pipe',
+      timeout: 10000,
+      env: {
+        ...process.env,
+        GNUPGHOME: process.env.GNUPGHOME || path.join(os.homedir(), '.gnupg'),
+      }
+    });
+    console.log('✅ GPG passphrase cached successfully');
+  } catch (error) {
+    console.warn('⚠️ GPG pre-cache failed:', (error as Error).message);
+  }
+  
+  // Execute SOPS
+  const decryptOutput = execSync(`"${sopsPath}" -d --output-type json "${secretsPath}"`, {
+    encoding: 'utf8',
+    timeout: 30000,
+    env: {
+      ...process.env,
+      GNUPGHOME: process.env.GNUPGHOME || path.join(os.homedir(), '.gnupg'),
+      GPG_PASSPHRASE: gpgPassphrase
+    },
+    stdio: ['pipe', 'pipe', 'pipe']
+  });
+  
+  console.log('✅ SOPS decryption successful (Windows)');
+  return decryptOutput;
+};
+
+/**
+ * Decrypt SOPS file with Linux-specific optimizations
+ */
+const decryptSopsLinux = (sopsPath: string, secretsPath: string, gpgPassphrase: string): string => {
+  console.log('🐧 Linux SOPS decryption starting...');
+  
+  try {
+    // Method 1: Direct SOPS with GPG_PASSPHRASE environment
+    const result = execSync(`"${sopsPath}" -d --output-type json "${secretsPath}"`, {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GPG_PASSPHRASE: gpgPassphrase,
+        GPG_TTY: process.env.GPG_TTY || '/dev/tty',
+        GNUPGHOME: process.env.GNUPGHOME || path.join(os.homedir(), '.gnupg')
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 30000
+    });
+    
+    console.log('✅ SOPS decryption successful (Linux Method 1)');
+    return result;
+    
+  } catch (error1) {
+    console.log('⚠️ Method 1 failed, trying Method 2...');
+    
+    try {
+      // Method 2: Using echo for passphrase input
+      const result = execSync(`echo "${gpgPassphrase}" | "${sopsPath}" -d --output-type json "${secretsPath}"`, {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GPG_BATCH: '1',
+          GPG_USE_AGENT: '0',
+          GNUPGHOME: process.env.GNUPGHOME || path.join(os.homedir(), '.gnupg')
+        },
+        stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: 30000,
+        shell: '/bin/bash'
+      });
+      
+      console.log('✅ SOPS decryption successful (Linux Method 2)');
+      return result;
+      
+    } catch (error2) {
+      console.log('⚠️ Method 2 failed, trying Method 3...');
+      
+      try {
+        // Method 3: Temporary script approach
+        const tempScript = path.join(os.tmpdir(), `decrypt-${Date.now()}.sh`);
+        const scriptContent = `#!/bin/bash
+export GNUPGHOME="${process.env.GNUPGHOME || path.join(os.homedir(), '.gnupg')}"
+export GPG_BATCH=1
+export GPG_USE_AGENT=0
+echo "${gpgPassphrase}" | "${sopsPath}" -d --output-type json "${secretsPath}"`;
+        
+        fs.writeFileSync(tempScript, scriptContent, { mode: 0o755 });
+        
+        const result = execSync(`"${tempScript}"`, {
+          encoding: 'utf8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+          timeout: 30000
+        });
+        
+        // Clean up immediately
+        fs.unlinkSync(tempScript);
+        
+        console.log('✅ SOPS decryption successful (Linux Method 3)');
+        return result;
+        
+      } catch (error3) {
+        // Clean up script if it exists
+        const tempScript = path.join(os.tmpdir(), `decrypt-${Date.now()}.sh`);
+        if (fs.existsSync(tempScript)) {
+          fs.unlinkSync(tempScript);
+        }
+        
+        console.error('❌ All SOPS decryption methods failed on Linux:');
+        console.error('   Method 1 (env):', (error1 as Error).message.substring(0, 200));
+        console.error('   Method 2 (echo):', (error2 as Error).message.substring(0, 200));
+        console.error('   Method 3 (script):', (error3 as Error).message.substring(0, 200));
+        
+        throw new Error('SOPS decryption failed with all methods on Linux. Check GPG setup and passphrase.');
+      }
+    }
+  }
+};
+
+/**
+ * Standalone config loading with cross-platform SOPS support
  */
 const loadStandaloneConfig = async () => {
   console.log('🔒 Loading config via SOPS from local repo (Standalone Mode)');
@@ -110,6 +299,7 @@ const loadStandaloneConfig = async () => {
   }
   
   console.log(`📁 Using local repo: ${envsRepoPath}`);
+  console.log(`🖥️ Platform: ${process.platform}`);
   
   try {
     // 1. Load config.yaml (non-encrypted)
@@ -135,95 +325,65 @@ const loadStandaloneConfig = async () => {
       throw new Error(`Client secrets.sops.yaml not found: ${clientId}`);
     }
     
-    console.log(`🔓 Decrypting secrets for client: ${clientId} (in-memory)`);
+    console.log(`🔓 Decrypting secrets for client: ${clientId} (${process.platform})`);
     
-    // Use SOPS with GPG passphrase - Windows-specific approach
-    const sopsPath = path.join(envsRepoPath, 'tools/win64/sops.exe');
+    // Get platform-specific SOPS path
+    const sopsPath = getSopsPath(envsRepoPath);
+    console.log(`🔧 Using SOPS binary: ${sopsPath}`);
     
-    if (!fs.existsSync(sopsPath)) {
-      throw new Error(`SOPS binary not found at: ${sopsPath}`);
+    // Decrypt using platform-specific method
+    let decryptOutput: string;
+    if (process.platform === 'win32') {
+      decryptOutput = decryptSopsWindows(sopsPath, secretsPath, gpgPassphrase);
+    } else {
+      decryptOutput = decryptSopsLinux(sopsPath, secretsPath, gpgPassphrase);
     }
     
-    // 🔥 PRE-CACHE GPG PASSPHRASE - This is the key fix!
-    console.log('🔥 Pre-caching GPG passphrase...');
-    try {
-      execSync(`echo test | gpg --sign --armor --batch --yes --passphrase "${gpgPassphrase}" --pinentry-mode loopback`, {
-        stdio: 'pipe',
-        timeout: 10000,
-        env: {
-          ...process.env,
-          GNUPGHOME: process.env.GNUPGHOME || path.join(os.homedir(), '.gnupg'),
-        }
-      });
-      console.log('✅ GPG passphrase cached successfully');
-    } catch (error) {
-      console.warn('⚠️ GPG pre-cache failed:', (error as Error).message);
-      console.warn('🔄 Continuing with SOPS anyway...');
-    }
+    const secretsConfig = JSON.parse(decryptOutput);
+    console.log('✅ Secrets decrypted successfully in memory');
     
-    // Now execute SOPS with properly cached GPG agent
-    try {
-      // Use SOPS directly now that GPG agent is warmed up
-      const decryptOutput = execSync(`"${sopsPath}" -d --output-type json "${secretsPath}"`, {
-        encoding: 'utf8',
-        timeout: 30000,
-        env: {
-          ...process.env,
-          GNUPGHOME: process.env.GNUPGHOME || path.join(os.homedir(), '.gnupg'),
-          GPG_PASSPHRASE: gpgPassphrase
-        },
-        stdio: ['pipe', 'pipe', 'pipe']
-      });
+    // 3. Merge configs (secrets override yaml)
+    const mergedConfig = {
+      ...yamlConfig,
+      ...secretsConfig,
+      // Map snake_case to camelCase
+      senderEmail: secretsConfig.sender_email ?? yamlConfig.senderEmail ?? '',
+      clientId: secretsConfig.client_id ?? yamlConfig.clientId ?? '',
+      clientSecret: secretsConfig.client_secret ?? yamlConfig.clientSecret ?? '',
+      tenantId: secretsConfig.tenant_id ?? yamlConfig.tenantId ?? '',
+      refreshToken: secretsConfig.refresh_token ?? yamlConfig.refreshToken ?? '',
+      tenantClientId: secretsConfig.tenant_client_id ?? yamlConfig.tenantClientId ?? '',
+      tokenEndpoint: secretsConfig.token_endpoint ?? yamlConfig.tokenEndpoint ?? 'https://login.microsoftonline.com',
+      jwtSecret: secretsConfig.jwt_secret ?? yamlConfig.jwtSecret ?? '',
+      internalJwtSecret: secretsConfig.internal_jwt_secret ?? yamlConfig.internalJwtSecret ?? '',
+      authUsername: secretsConfig.auth_username ?? yamlConfig.authUsername,
+      authPassword: secretsConfig.auth_password ?? yamlConfig.authPassword,
       
-      const secretsConfig = JSON.parse(decryptOutput);
-      console.log('✅ Secrets decrypted successfully in memory');
+      // Composed URLs
+      coreApiHost: yamlConfig.coreApiHost ?? '',
+      servicesPort: yamlConfig.servicesPort ?? '',
+      authUrl: yamlConfig.authUrl ?? '',
+      backendUrl: yamlConfig.backendUrl ?? '',
+      apiUrl: `${yamlConfig.coreApiHost}:${yamlConfig.servicesPort}${yamlConfig.backendUrl}`,
+      authFullUrl: `${yamlConfig.coreApiHost}:${yamlConfig.servicesPort}${yamlConfig.authUrl}`,
       
-      // 3. Merge configs (secrets override yaml)
-      const mergedConfig = {
-        ...yamlConfig,
-        ...secretsConfig,
-        // Map snake_case to camelCase
-        senderEmail: secretsConfig.sender_email ?? yamlConfig.senderEmail ?? '',
-        clientId: secretsConfig.client_id ?? yamlConfig.clientId ?? '',
-        clientSecret: secretsConfig.client_secret ?? yamlConfig.clientSecret ?? '',
-        tenantId: secretsConfig.tenant_id ?? yamlConfig.tenantId ?? '',
-        refreshToken: secretsConfig.refresh_token ?? yamlConfig.refreshToken ?? '',
-        tenantClientId: secretsConfig.tenant_client_id ?? yamlConfig.tenantClientId ?? '',
-        tokenEndpoint: secretsConfig.token_endpoint ?? yamlConfig.tokenEndpoint ?? 'https://login.microsoftonline.com',
-        jwtSecret: secretsConfig.jwt_secret ?? yamlConfig.jwtSecret ?? '',
-        internalJwtSecret: secretsConfig.internal_jwt_secret ?? yamlConfig.internalJwtSecret ?? '',
-        authUsername: secretsConfig.auth_username ?? yamlConfig.authUsername,
-        authPassword: secretsConfig.auth_password ?? yamlConfig.authPassword,
-        
-        // Composed URLs
-        coreApiHost: yamlConfig.coreApiHost ?? '',
-        servicesPort: yamlConfig.servicesPort ?? '',
-        authUrl: yamlConfig.authUrl ?? '',
-        backendUrl: yamlConfig.backendUrl ?? '',
-        apiUrl: `${yamlConfig.coreApiHost}:${yamlConfig.servicesPort}${yamlConfig.backendUrl}`,
-        authFullUrl: `${yamlConfig.coreApiHost}:${yamlConfig.servicesPort}${yamlConfig.authUrl}`,
-        
-        // Certificate config
-        certPdfSignType: yamlConfig.certPdfSignType ?? 'p12',
-        certPdfSignPath: secretsConfig.cert_pdf_sign_path ?? yamlConfig.certPdfSignPath ?? '',
-        certPdfSignPassword: secretsConfig.cert_pdf_sign_password ?? yamlConfig.certPdfSignPassword ?? '',
-        
-        // Mark as standalone mode
-        standalone_mode: true,
-        config_source: 'SOPS_LOCAL'
-      };
+      // Certificate config
+      certPdfSignType: yamlConfig.certPdfSignType ?? 'p12',
+      certPdfSignPath: secretsConfig.cert_pdf_sign_path ?? yamlConfig.certPdfSignPath ?? '',
+      certPdfSignPassword: secretsConfig.cert_pdf_sign_password ?? yamlConfig.certPdfSignPassword ?? '',
       
-      console.log('✅ Config loaded successfully in standalone mode');
-      console.log('🔒 All secrets loaded in memory - no plaintext files created');
-      
-      return mergedConfig;
-      
-    } catch (decryptError) {
-      throw decryptError;
-    }
+      // Mark as standalone mode
+      standalone_mode: true,
+      config_source: `SOPS_LOCAL_${process.platform.toUpperCase()}`
+    };
+    
+    console.log(`✅ Config loaded successfully in standalone mode (${process.platform})`);
+    console.log('🔒 All secrets loaded in memory - no plaintext files created');
+    
+    return mergedConfig;
     
   } catch (error) {
-    console.error('❌ Standalone config loading failed:', (error as Error).message);
+    console.error(`❌ Standalone config loading failed on ${process.platform}:`, (error as Error).message);
     throw error;
   }
 };
@@ -332,13 +492,13 @@ const getClientId = (): string => {
     return cliClientId;
   }
   
-  // 2. Environment variable (Windows Service)
+  // 2. Environment variable
   if (process.env.CLIENT_ID) {
     console.log(`📝 Using CLIENT_ID from ENV: ${process.env.CLIENT_ID}`);
     return process.env.CLIENT_ID;
   }
   
-  // 3. Windows Registry (Windows Service)
+  // 3. Windows Registry (Windows Service only)
   if (process.platform === 'win32' && process.env.NODE_ENV === 'production') {
     try {
       const regValue = execSync(
