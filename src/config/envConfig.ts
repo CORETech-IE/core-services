@@ -68,14 +68,14 @@ const getConfigMode = (): 'standalone' | 'traditional' => {
 const getGPGPassphrase = (): string => {
   // 1. Environment variable (highest priority)
   if (process.env.GPG_PASSPHRASE) {
-    console.log('🔑 Using GPG passphrase from environment');
+    console.log('?? Using GPG passphrase from environment');
     return process.env.GPG_PASSPHRASE;
   }
   
   // 2. CLI argument --gpg-passphrase
   const passphraseArg = process.argv.find(arg => arg.startsWith('--gpg-passphrase='));
   if (passphraseArg) {
-    console.log('🔑 Using GPG passphrase from CLI argument');
+    console.log('?? Using GPG passphrase from CLI argument');
     return passphraseArg.split('=')[1];
   }
   
@@ -88,11 +88,11 @@ const getGPGPassphrase = (): string => {
       );
       const match = regValue.match(/GPGPassphrase\s+REG_SZ\s+(.+)/);
       if (match) {
-        console.log('🔑 Using GPG passphrase from Windows Registry');
+        console.log('?? Using GPG passphrase from Windows Registry');
         return match[1].trim();
       }
     } catch (error) {
-      console.warn('⚠️ Could not read GPG passphrase from Windows Registry');
+      console.warn('?? Could not read GPG passphrase from Windows Registry');
     }
   }
   
@@ -102,10 +102,10 @@ const getGPGPassphrase = (): string => {
     try {
       const encryptedPassphrase = fs.readFileSync(securePassphraseFile, 'utf8').trim();
       const passphrase = Buffer.from(encryptedPassphrase, 'base64').toString('utf8');
-      console.log('🔑 Using GPG passphrase from secure file');
+      console.log('?? Using GPG passphrase from secure file');
       return passphrase;
     } catch (error) {
-      console.warn('⚠️ Could not read GPG passphrase from secure file');
+      console.warn('?? Could not read GPG passphrase from secure file');
     }
   }
   
@@ -136,16 +136,16 @@ const getSopsPath = (envsRepoPath: string): string => {
       try {
         if (sopsPath === 'sops') {
           execSync('which sops', { stdio: 'pipe' });
-          console.log(`🐧 Using SOPS from PATH`);
+          console.log(`?? Using SOPS from PATH`);
           return 'sops';
         } else if (fs.existsSync(sopsPath)) {
           // Make sure it's executable
           try {
             fs.chmodSync(sopsPath, 0o755);
           } catch (chmodError) {
-            console.warn(`⚠️ Could not set executable permissions on ${sopsPath}`);
+            console.warn(`?? Could not set executable permissions on ${sopsPath}`);
           }
-          console.log(`🐧 Using SOPS binary: ${sopsPath}`);
+          console.log(`?? Using SOPS binary: ${sopsPath}`);
           return sopsPath;
         }
       } catch (error) {
@@ -161,7 +161,7 @@ const getSopsPath = (envsRepoPath: string): string => {
  * Decrypt SOPS file with Windows-specific optimizations
  */
 const decryptSopsWindows = (sopsPath: string, secretsPath: string, gpgPassphrase: string): string => {
-  console.log('🪟 Windows SOPS decryption with optimizations...');
+  console.log('?? Windows SOPS decryption with optimizations...');
   
   // Pre-cache GPG passphrase
   try {
@@ -173,9 +173,9 @@ const decryptSopsWindows = (sopsPath: string, secretsPath: string, gpgPassphrase
         GNUPGHOME: process.env.GNUPGHOME || path.join(os.homedir(), '.gnupg'),
       }
     });
-    console.log('✅ GPG passphrase cached successfully');
+    console.log('? GPG passphrase cached successfully');
   } catch (error) {
-    console.warn('⚠️ GPG pre-cache failed:', (error as Error).message);
+    console.warn('?? GPG pre-cache failed:', (error as Error).message);
   }
   
   // Execute SOPS
@@ -190,44 +190,49 @@ const decryptSopsWindows = (sopsPath: string, secretsPath: string, gpgPassphrase
     stdio: ['pipe', 'pipe', 'pipe']
   });
   
-  console.log('✅ SOPS decryption successful (Windows)');
+  console.log('? SOPS decryption successful (Windows)');
   return decryptOutput;
 };
 
 /**
- * Decrypt SOPS file with Linux-specific optimizations
+ * Decrypt SOPS file with Linux-specific optimizations (GPG POPUP KILLER)
  */
 const decryptSopsLinux = (sopsPath: string, secretsPath: string, gpgPassphrase: string): string => {
-  console.log('🐧 Linux SOPS decryption starting...');
+  console.log('?? Linux SOPS decryption starting (killing GPG popups)...');
   
   try {
-    // Method 1: Direct SOPS with GPG_PASSPHRASE environment
+    // Method 1: FORCE GPG to use our passphrase (NO POPUPS!)
     const result = execSync(`"${sopsPath}" -d --output-type json "${secretsPath}"`, {
       encoding: 'utf8',
       env: {
         ...process.env,
         GPG_PASSPHRASE: gpgPassphrase,
-        GPG_TTY: process.env.GPG_TTY || '/dev/tty',
+        GPG_TTY: '/dev/null',              // ? KILL TTY
+        DISPLAY: '',                       // ? KILL X11 POPUPS  
+        GPG_AGENT_INFO: '',               // ? DISABLE AGENT
+        GPG_BATCH: '1',                   // ? BATCH MODE
         GNUPGHOME: process.env.GNUPGHOME || path.join(os.homedir(), '.gnupg')
       },
       stdio: ['pipe', 'pipe', 'pipe'],
       timeout: 30000
     });
     
-    console.log('✅ SOPS decryption successful (Linux Method 1)');
+    console.log('? SOPS decryption successful (Linux Method 1 - No popups)');
     return result;
     
   } catch (error1) {
-    console.log('⚠️ Method 1 failed, trying Method 2...');
+    console.log('?? Method 1 failed, trying Method 2 (pipe passphrase)...');
     
     try {
-      // Method 2: Using echo for passphrase input
+      // Method 2: Pipe passphrase directly + kill all interactive stuff
       const result = execSync(`echo "${gpgPassphrase}" | "${sopsPath}" -d --output-type json "${secretsPath}"`, {
         encoding: 'utf8',
         env: {
           ...process.env,
           GPG_BATCH: '1',
-          GPG_USE_AGENT: '0',
+          GPG_USE_AGENT: '0',              // ? NO AGENT
+          GPG_TTY: '/dev/null',            // ? NO TTY
+          DISPLAY: '',                     // ? NO X11
           GNUPGHOME: process.env.GNUPGHOME || path.join(os.homedir(), '.gnupg')
         },
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -235,25 +240,41 @@ const decryptSopsLinux = (sopsPath: string, secretsPath: string, gpgPassphrase: 
         shell: '/bin/bash'
       });
       
-      console.log('✅ SOPS decryption successful (Linux Method 2)');
+      console.log('? SOPS decryption successful (Linux Method 2 - Piped passphrase)');
       return result;
       
     } catch (error2) {
-      console.log('⚠️ Method 2 failed, trying Method 3...');
+      console.log('?? Method 2 failed, trying Method 3 (hardcore script)...');
       
       try {
-        // Method 3: Temporary script approach
+        // Method 3: Nuclear option - script with ALL GPG popup killers
         const tempScript = path.join(os.tmpdir(), `decrypt-${Date.now()}.sh`);
         const scriptContent = `#!/bin/bash
+# NUCLEAR GPG POPUP KILLER SCRIPT
 export GNUPGHOME="${process.env.GNUPGHOME || path.join(os.homedir(), '.gnupg')}"
 export GPG_BATCH=1
 export GPG_USE_AGENT=0
+export GPG_TTY=/dev/null
+export DISPLAY=""
+export GPG_AGENT_INFO=""
+unset SSH_AGENT_PID
+unset SSH_AUTH_SOCK
+# Pre-load passphrase into gpg-agent cache
+echo "test" | gpg --batch --yes --passphrase "${gpgPassphrase}" --pinentry-mode loopback --symmetric --cipher-algo AES256 --output /dev/null 2>/dev/null || true
+# Now decrypt with SOPS
 echo "${gpgPassphrase}" | "${sopsPath}" -d --output-type json "${secretsPath}"`;
         
         fs.writeFileSync(tempScript, scriptContent, { mode: 0o755 });
         
-        const result = execSync(`"${tempScript}"`, {
+        const result = execSync(`bash "${tempScript}"`, {
           encoding: 'utf8',
+          env: {
+            ...process.env,
+            GPG_BATCH: '1',
+            GPG_USE_AGENT: '0',
+            GPG_TTY: '/dev/null',
+            DISPLAY: ''
+          },
           stdio: ['pipe', 'pipe', 'pipe'],
           timeout: 30000
         });
@@ -261,7 +282,7 @@ echo "${gpgPassphrase}" | "${sopsPath}" -d --output-type json "${secretsPath}"`;
         // Clean up immediately
         fs.unlinkSync(tempScript);
         
-        console.log('✅ SOPS decryption successful (Linux Method 3)');
+        console.log('? SOPS decryption successful (Linux Method 3 - Nuclear option)');
         return result;
         
       } catch (error3) {
@@ -271,12 +292,13 @@ echo "${gpgPassphrase}" | "${sopsPath}" -d --output-type json "${secretsPath}"`;
           fs.unlinkSync(tempScript);
         }
         
-        console.error('❌ All SOPS decryption methods failed on Linux:');
+        console.error('? All SOPS decryption methods failed on Linux (even the nuclear option):');
         console.error('   Method 1 (env):', (error1 as Error).message.substring(0, 200));
         console.error('   Method 2 (echo):', (error2 as Error).message.substring(0, 200));
-        console.error('   Method 3 (script):', (error3 as Error).message.substring(0, 200));
+        console.error('   Method 3 (nuclear):', (error3 as Error).message.substring(0, 200));
+        console.error('?? Try running: gpgconf --kill gpg-agent && gpg-agent --daemon');
         
-        throw new Error('SOPS decryption failed with all methods on Linux. Check GPG setup and passphrase.');
+        throw new Error('SOPS decryption failed with all methods on Linux. GPG is being stubborn.');
       }
     }
   }
@@ -286,7 +308,7 @@ echo "${gpgPassphrase}" | "${sopsPath}" -d --output-type json "${secretsPath}"`;
  * Standalone config loading with cross-platform SOPS support
  */
 const loadStandaloneConfig = async () => {
-  console.log('🔒 Loading config via SOPS from local repo (Standalone Mode)');
+  console.log('?? Loading config via SOPS from local repo (Standalone Mode)');
   
   const clientId = getClientId();
   const gpgPassphrase = getGPGPassphrase();
@@ -298,8 +320,8 @@ const loadStandaloneConfig = async () => {
     throw new Error(`core-envs-private repo not found at: ${envsRepoPath}`);
   }
   
-  console.log(`📁 Using local repo: ${envsRepoPath}`);
-  console.log(`🖥️ Platform: ${process.platform}`);
+  console.log(`?? Using local repo: ${envsRepoPath}`);
+  console.log(`??? Platform: ${process.platform}`);
   
   try {
     // 1. Load config.yaml (non-encrypted)
@@ -317,7 +339,7 @@ const loadStandaloneConfig = async () => {
       return acc;
     }, {} as Record<string, any>);
     
-    console.log('✅ config.yaml loaded successfully');
+    console.log('? config.yaml loaded successfully');
     
     // 2. Load and decrypt secrets.sops.yaml IN MEMORY
     const secretsPath = path.join(envsRepoPath, `clients/${clientId}/secrets.sops.yaml`);
@@ -325,11 +347,11 @@ const loadStandaloneConfig = async () => {
       throw new Error(`Client secrets.sops.yaml not found: ${clientId}`);
     }
     
-    console.log(`🔓 Decrypting secrets for client: ${clientId} (${process.platform})`);
+    console.log(`?? Decrypting secrets for client: ${clientId} (${process.platform})`);
     
     // Get platform-specific SOPS path
     const sopsPath = getSopsPath(envsRepoPath);
-    console.log(`🔧 Using SOPS binary: ${sopsPath}`);
+    console.log(`?? Using SOPS binary: ${sopsPath}`);
     
     // Decrypt using platform-specific method
     let decryptOutput: string;
@@ -340,7 +362,7 @@ const loadStandaloneConfig = async () => {
     }
     
     const secretsConfig = JSON.parse(decryptOutput);
-    console.log('✅ Secrets decrypted successfully in memory');
+    console.log('? Secrets decrypted successfully in memory');
     
     // 3. Merge configs (secrets override yaml)
     const mergedConfig = {
@@ -377,13 +399,13 @@ const loadStandaloneConfig = async () => {
       config_source: `SOPS_LOCAL_${process.platform.toUpperCase()}`
     };
     
-    console.log(`✅ Config loaded successfully in standalone mode (${process.platform})`);
-    console.log('🔒 All secrets loaded in memory - no plaintext files created');
+    console.log(`? Config loaded successfully in standalone mode (${process.platform})`);
+    console.log('?? All secrets loaded in memory - no plaintext files created');
     
     return mergedConfig;
     
   } catch (error) {
-    console.error(`❌ Standalone config loading failed on ${process.platform}:`, (error as Error).message);
+    console.error(`? Standalone config loading failed on ${process.platform}:`, (error as Error).message);
     throw error;
   }
 };
@@ -392,7 +414,7 @@ const loadStandaloneConfig = async () => {
  * Traditional mode (unchanged)
  */
 const loadTraditionalConfig = () => {
-  console.log('📄 Loading config via .env + YAML (traditional mode)');
+  console.log('?? Loading config via .env + YAML (traditional mode)');
   
   const envPath = path.resolve(__dirname, '../.env');
   if (fs.existsSync(envPath)) {
@@ -410,9 +432,9 @@ const loadTraditionalConfig = () => {
     
     // Set environment variables
     Object.assign(process.env, envVars);
-    console.log(`✅ Loaded .env from: ${envPath}`);
+    console.log(`? Loaded .env from: ${envPath}`);
   } else {
-    console.warn(`⚠️ .env not found at: ${envPath}`);
+    console.warn(`?? .env not found at: ${envPath}`);
   }
 
   const clientId = getClientId();
@@ -429,9 +451,9 @@ const loadTraditionalConfig = () => {
       return acc;
     }, {} as Record<string, any>);
     
-    console.log(`✅ Loaded config.yaml from: ${yamlPath}`);
+    console.log(`? Loaded config.yaml from: ${yamlPath}`);
   } catch (err) {
-    console.warn(`⚠️ Failed to load config.yaml at ${yamlPath}:`, err);
+    console.warn(`?? Failed to load config.yaml at ${yamlPath}:`, err);
   }
 
   return {
@@ -488,13 +510,13 @@ const getClientId = (): string => {
   const cliClientId = cliArgs.find(arg => !arg.startsWith('--'));
   
   if (cliClientId) {
-    console.log(`📝 Using CLIENT_ID from CLI: ${cliClientId}`);
+    console.log(`?? Using CLIENT_ID from CLI: ${cliClientId}`);
     return cliClientId;
   }
   
   // 2. Environment variable
   if (process.env.CLIENT_ID) {
-    console.log(`📝 Using CLIENT_ID from ENV: ${process.env.CLIENT_ID}`);
+    console.log(`?? Using CLIENT_ID from ENV: ${process.env.CLIENT_ID}`);
     return process.env.CLIENT_ID;
   }
   
@@ -508,16 +530,16 @@ const getClientId = (): string => {
       const match = regValue.match(/ClientID\s+REG_SZ\s+(.+)/);
       if (match) {
         const clientId = match[1].trim();
-        console.log(`📝 Using CLIENT_ID from Windows Registry: ${clientId}`);
+        console.log(`?? Using CLIENT_ID from Windows Registry: ${clientId}`);
         return clientId;
       }
     } catch (error) {
-      console.warn('⚠️ Could not read CLIENT_ID from Windows Registry');
+      console.warn('?? Could not read CLIENT_ID from Windows Registry');
     }
   }
   
   // 4. Default fallback
-  console.log(`📝 Using default CLIENT_ID: core-dev`);
+  console.log(`?? Using default CLIENT_ID: core-dev`);
   return 'core-dev';
 };
 
