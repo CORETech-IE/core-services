@@ -10,6 +10,9 @@ import os from 'os';
  */
 export class WindowsGpgFix {
   
+  // Updated fingerprint for new GPG key
+  private static readonly REQUIRED_GPG_KEY = 'EC5A8F24358F986C983BA5F384F09B1D810A6590';
+  
   /**
    * Setup GPG environment for Windows
    */
@@ -57,12 +60,15 @@ export class WindowsGpgFix {
         stdio: 'pipe'
       });
       
-      if (!secretKeys.includes('C9B7D0EA72899E6D764D97279EE538D3A441F8D0')) {
-        console.error('❌ Required GPG key not found');
+      // Updated to use new GPG key fingerprint
+      if (!secretKeys.includes(this.REQUIRED_GPG_KEY)) {
+        console.error(`❌ Required GPG key not found: ${this.REQUIRED_GPG_KEY}`);
+        console.log('Available keys:');
+        console.log(secretKeys);
         return false;
       }
       
-      console.log('✅ GPG key found');
+      console.log(`✅ GPG key found: ${this.REQUIRED_GPG_KEY}`);
       
       // Test 2: Test gpg-agent
       try {

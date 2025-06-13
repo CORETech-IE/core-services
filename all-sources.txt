@@ -1,0 +1,6020 @@
+// app.ts
+import express from "express";
+import helmet from "helmet";
+import { getConfigAsync } from "./config/envConfig";
+import { validateConfig } from "./config/config-validator";
+import { initServiceContainer } from "./services/serviceContainer";
+import { createAuthenticateJWT } from "./middlewares/authenticateJWT";
+import { authorizeAdmin } from "./middlewares";
+import authRoutes from "./routes/authRoutes";
+import emailPublicRoutes from "./services/email/publicRoutes";
+import pdfRoutes from "./services/pdf/routes";
+import zplRoutes from "./services/zpl/routes";
+import logger from "./utils/logging";
+import gdprRoutes from "./routes/gdprRoutes";
+import { initGDPRService } from "./services/gdpr/gdprTokenService";
+
+const startApp = async () => {
+  const config = await getConfigAsync();
+  console.log("🚀 Config loaded!");
+
+  validateConfig(config);
+  console.log("✅ Config validated!");
+
+  await initServiceContainer(config);
+  console.log("🏗️ Service container initialized");
+
+  // Después de initServiceContainer:
+  initGDPRService();
+  console.log("🔐 GDPR service initialized");
+
+  logger.startMetrics(30000); // Start metrics collection every 30 seconds
+  console.log("📊 Metrics collection started");
+
+  // Create JWT middleware with loaded config
+  const authenticateJWT = createAuthenticateJWT(config.jwtSecret);
+  console.log("🔐 JWT middleware created");
+
+  const app = express();
+  app.use(helmet());
+  app.use(express.json());
+
+  // Auth routes - para poder hacer login
+  app.use("/auth", authRoutes);
+
+  // EMAIL ROUTES - ¡EL MOMENTO DE LA VERDAD!
+  app.use("/api/email", /*authenticateJWT, authorizeAdmin,*/ emailPublicRoutes);
+  app.use("/api/gdpr", gdprRoutes);
+
+  // Public routes for pdf and zpl services
+  app.use("/generate-pdf", /*authenticateJWT, authorizeAdmin,*/ pdfRoutes);
+  app.use("/generate-zpl", /*authenticateJWT, authorizeAdmin,*/ zplRoutes);
+
+  app.get("/health", (_, res) => {
+    res.status(200).send("OK");
+  });
+
+  console.log("📝 About to start express server...");
+
+  const PORT = config.servicesPort || 3001;
+  app.listen(PORT, () => {
+    console.log(`[core-services] API listening on port ${PORT}`);
+    console.log("[core-services] 🚀 FULL EMAIL FUNCTIONALITY");
+    console.log("[core-services] Ready for ISO 27001 compliant emails!");
+  });
+};
+
+console.log("🔄 Listen called, waiting for server...");
+
+startApp().catch(console.error);
+
+// config/browserPool.ts
+import puppeteer, { Browser, Page } from 'puppeteer';
+import fs from 'fs';
+import os from 'os';
+
+const MAX_BROWSERS = 4;
+const browsers: Browser[] = [];
+const availablePages: Page[] = [];
+
+function getExecutablePath(): string | undefined {
+  const platform = os.platform();
+  if (platform === 'linux') {
+    const chromePath = '/usr/bin/google-chrome';
+    if (fs.existsSync(chromePath)) return chromePath;
+  }
+  return undefined;
+}
+
+export async function initializeBrowserPool() {
+  for (let i = 0; i < MAX_BROWSERS; i++) {
+    const browser = await puppeteer.launch({
+      headless: 'new',
+      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      executablePath: getExecutablePath(),
+    });
+    browsers.push(browser);
+    // No creamos páginas aún. Las pediremos dinámicamente.
+  }
+  console.log(`[core-services] Browser pool initialized with ${MAX_BROWSERS} browsers.`);
+}
+
+export async function acquirePage(): Promise<Page> {
+  if (availablePages.length > 0) {
+    return availablePages.pop()!;
+  }
+
+  // Si no hay páginas, crea una nueva en el primer browser disponible
+  const browser = browsers[Math.floor(Math.random() * browsers.length)];
+  return await browser.newPage();
+}
+
+export async function releasePage(page: Page) {
+  try {
+    await page.goto('about:blank'); // Limpia el contenido
+    availablePages.push(page);
+  } catch {
+    // Si falla, se destruye y no se guarda
+    await page.close();
+  }
+}
+
+export async function closeAllBrowsers() {
+  for (const browser of browsers) {
+    await browser.close();
+  }
+}
+
+// config/config-validator.ts
+import logger from '../utils/logging';
+
+export function validateConfig(config: any): void {
+  const requiredVars: { key: string; label: string }[] = [
+    { key: "clientId", label: "CLIENT_ID" },
+    { key: "clientSecret", label: "CLIENT_SECRET" },
+    { key: "tenantId", label: "TENANT_CLIENT_ID" },
+    { key: "senderEmail", label: "SENDER_EMAIL" },
+  ];
+
+  // SECURE: Only log config in verbose mode, and sanitize sensitive data
+  logger.debug('Config validation started', {
+    config_keys: config ? Object.keys(config) : null,
+    config_size: config ? Object.keys(config).length : 0,
+    // Only include non-sensitive config parts in verbose mode
+    ...(logger.isVerbose() && {
+      non_sensitive_config: {
+        tenantClientId: config?.tenantClientId,
+        coreApiHost: config?.coreApiHost,
+        servicesPort: config?.servicesPort,
+        backendPort: config?.backendPort,
+        has_clientId: !!config?.clientId,
+        has_clientSecret: !!config?.clientSecret,
+        has_tenantId: !!config?.tenantId,
+        has_senderEmail: !!config?.senderEmail,
+        has_jwtSecret: !!config?.jwtSecret
+      }
+    })
+  });
+
+  // Handle null config (can happen in standalone mode if not properly loaded)
+  if (!config) {
+    logger.error("Configuration is null or undefined", {
+      operation: 'SYSTEM',
+      error_code: 'CONFIG_NULL'
+    });
+    console.error("❌ Configuration is null or undefined");
+    process.exit(1);
+  }
+
+  const missing = requiredVars.filter(({ key }) => !config[key]);
+
+  if (missing.length > 0) {
+    const missingLabels = missing.map(({ label }) => label);
+    
+    logger.error("Missing required environment variables", {
+      operation: 'SYSTEM',
+      error_code: 'MISSING_ENV_VARS',
+      missing_variables: missingLabels,
+      missing_count: missing.length,
+      total_required: requiredVars.length
+    });
+    
+    console.error("❌ Missing required environment variables:");
+    missing.forEach(({ label }) => console.error(`  - ${label}`));
+    process.exit(1);
+  }
+
+  // Success logging with secure details
+  logger.system("Configuration validation successful", {
+    required_vars_count: requiredVars.length,
+    validated_keys: requiredVars.map(v => v.key),
+    config_source: config.standalone_mode ? 'SOPS' : 'Environment',
+    ...(logger.isVerbose() && {
+      // Additional details only in verbose mode
+      client_id_length: config.clientId?.length || 0,
+      sender_email: config.senderEmail,
+      tenant_id: config.tenantId
+    })
+  });
+
+  console.log("✅ All required environment variables are present.");
+}
+// config/config.ts
+import fs from 'fs';
+import path from 'path';
+import yaml from 'js-yaml';
+import dotenv from 'dotenv';
+
+// Load environment variables from .env if available
+//dotenv.config();
+dotenv.config({ path: path.resolve(__dirname, './.env') });
+
+// Get client ID from CLI argument
+const clientId = process.argv[2];
+if (!clientId) {
+  console.error('❌ Missing CLIENT_ID. Usage: npm run dev -- core-dev');
+  process.exit(1);
+}
+
+// Resolve path to config.yaml (shared repo)
+const envsPath = path.resolve(__dirname, '../../../core-envs-private/clients', clientId);
+const configPath = path.join(envsPath, 'config.yaml');
+
+let clientConfig: any = {};
+
+try {
+  const fileContents = fs.readFileSync(configPath, 'utf8');
+  clientConfig = yaml.load(fileContents);
+} catch (error) {
+  console.error(`❌ Failed to load config for client "${clientId}" from ${configPath}`);
+  console.error(error);
+  process.exit(1);
+}
+
+export const config = {
+  pdf: {
+    templatePath: path.resolve(__dirname, '../../../reports_templates/templates'),
+    cssPath: path.resolve(__dirname, '../../../reports_templates/css')
+  },
+  zpl: {
+    templatePath: path.resolve(__dirname, '../../../reports_templates/templates')
+  },
+  email: {
+    smtpHost: clientConfig.smtp?.host || 'localhost',
+    smtpPort: clientConfig.smtp?.port || 587,
+    smtpUser: clientConfig.smtp?.user || '',
+    smtpPass: clientConfig.smtp?.pass || ''
+  },
+  auth: {
+    authUrl: process.env.AUTH_URL || 'http://localhost:3000/auth/login',
+    apiUrl: process.env.API_URL || 'http://localhost:3000/api',
+    username: process.env.AUTH_USERNAME,
+    password: process.env.AUTH_PASSWORD
+  },
+  security: {
+    jwtSecret: process.env.JWT_SECRET || '',
+    internalJwtSecret: process.env.INTERNAL_JWT_SECRET || ''
+  },
+  oauth: {
+    senderEmail: process.env.SENDER_EMAIL || '',
+    clientId: process.env.CLIENT_ID || '',
+    clientSecret: process.env.CLIENT_SECRET || '',
+    tenantId: process.env.TENANT_ID || '',
+    refreshToken: process.env.REFRESH_TOKEN || '',
+    tenantClientId: process.env.TENANT_CLIENT_ID || '',
+    tokenEndpoint: process.env.TOKEN_ENDPOINT || 'https://login.microsoftonline.com'
+  },
+  cert: {
+    certPdfSignType: process.env.CERT_PDF_SIGN_TYPE || 'p12', 
+    certPdfSignPassword: process.env.CERT_PDF_SIGN_PASSWORD, 
+    certPdfSignPath: process.env.CERT_PDF_SIGN_PATH , 
+  },
+  client: clientId,
+  raw: clientConfig
+};
+
+// config/envConfig.ts
+// config/envConfig.ts
+import { execSync } from 'child_process';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import yaml from 'js-yaml';
+
+interface RetryConfig {
+  maxAttempts: number;
+  baseDelayMs: number;
+  maxDelayMs: number;
+}
+
+const DEFAULT_RETRY_CONFIG: RetryConfig = {
+  maxAttempts: 3,
+  baseDelayMs: 1000,
+  maxDelayMs: 10000
+};
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * Determines configuration mode based on environment and CLI args
+ */
+const getConfigMode = (): 'standalone' | 'traditional' => {
+  if (process.argv.includes('--standalone')) return 'standalone';
+  if (process.env.CONFIG_MODE === 'standalone') return 'standalone';
+  
+  // Auto-detection for Windows Service
+  if (process.platform === 'win32' && process.env.NODE_ENV === 'production') {
+    return 'standalone';
+  }
+  
+  // Check for SOPS binary (platform-specific)
+  let hasSOPS = false;
+  if (process.platform === 'win32') {
+    hasSOPS = fs.existsSync(path.join(__dirname, '../../tools/win64/sops.exe'));
+  } else {
+    // Linux: check multiple locations
+    const linuxSopsPaths = [
+      path.join(__dirname, '../../tools/linux/sops'),
+      path.join(__dirname, '../../tools/sops'),
+      '/usr/local/bin/sops',
+      '/usr/bin/sops'
+    ];
+    hasSOPS = linuxSopsPaths.some(p => fs.existsSync(p));
+    
+    // Also check if sops is in PATH
+    if (!hasSOPS) {
+      try {
+        execSync('which sops', { stdio: 'pipe' });
+        hasSOPS = true;
+      } catch {
+        // sops not in PATH
+      }
+    }
+  }
+  
+  const hasEnv = fs.existsSync(path.join(__dirname, '../.env'));
+  
+  if (hasSOPS && !hasEnv) return 'standalone';
+  return 'traditional';
+};
+
+/**
+ * Get GPG passphrase from multiple sources with fallback
+ */
+const getGPGPassphrase = (): string => {
+  // 1. Environment variable (highest priority)
+  if (process.env.GPG_PASSPHRASE) {
+    console.log('?? Using GPG passphrase from environment');
+    return process.env.GPG_PASSPHRASE;
+  }
+  
+  // 2. CLI argument --gpg-passphrase
+  const passphraseArg = process.argv.find(arg => arg.startsWith('--gpg-passphrase='));
+  if (passphraseArg) {
+    console.log('?? Using GPG passphrase from CLI argument');
+    return passphraseArg.split('=')[1];
+  }
+  
+  // 3. Windows Service Registry (for production)
+  if (process.platform === 'win32' && process.env.NODE_ENV === 'production') {
+    try {
+      const regValue = execSync(
+        'reg query "HKLM\\SOFTWARE\\CoreServices" /v GPGPassphrase 2>nul', 
+        { encoding: 'utf8', timeout: 5000 }
+      );
+      const match = regValue.match(/GPGPassphrase\s+REG_SZ\s+(.+)/);
+      if (match) {
+        console.log('?? Using GPG passphrase from Windows Registry');
+        return match[1].trim();
+      }
+    } catch (error) {
+      console.warn('?? Could not read GPG passphrase from Windows Registry');
+    }
+  }
+  
+  // 4. File-based fallback (encrypted file in secure location)
+  const securePassphraseFile = path.join(process.cwd(), 'secure', 'gpg.key');
+  if (fs.existsSync(securePassphraseFile)) {
+    try {
+      const encryptedPassphrase = fs.readFileSync(securePassphraseFile, 'utf8').trim();
+      const passphrase = Buffer.from(encryptedPassphrase, 'base64').toString('utf8');
+      console.log('?? Using GPG passphrase from secure file');
+      return passphrase;
+    } catch (error) {
+      console.warn('?? Could not read GPG passphrase from secure file');
+    }
+  }
+  
+  throw new Error('GPG passphrase not found. Set GPG_PASSPHRASE environment variable or use --gpg-passphrase=xxx');
+};
+
+/**
+ * Get SOPS binary path based on platform
+ */
+const getSopsPath = (envsRepoPath: string): string => {
+  if (process.platform === 'win32') {
+    const winPath = path.join(envsRepoPath, 'tools/win64/sops.exe');
+    if (!fs.existsSync(winPath)) {
+      throw new Error(`SOPS Windows binary not found at: ${winPath}`);
+    }
+    return winPath;
+  } else {
+    // Linux/Unix - try multiple locations
+    const linuxPaths = [
+      path.join(envsRepoPath, 'tools/linux/sops'),
+      path.join(envsRepoPath, 'tools/sops'),
+      '/usr/local/bin/sops',
+      '/usr/bin/sops',
+      'sops' // PATH lookup
+    ];
+    
+    for (const sopsPath of linuxPaths) {
+      try {
+        if (sopsPath === 'sops') {
+          execSync('which sops', { stdio: 'pipe' });
+          console.log(`?? Using SOPS from PATH`);
+          return 'sops';
+        } else if (fs.existsSync(sopsPath)) {
+          // Make sure it's executable
+          try {
+            fs.chmodSync(sopsPath, 0o755);
+          } catch (chmodError) {
+            console.warn(`?? Could not set executable permissions on ${sopsPath}`);
+          }
+          console.log(`?? Using SOPS binary: ${sopsPath}`);
+          return sopsPath;
+        }
+      } catch (error) {
+        continue;
+      }
+    }
+    
+    throw new Error(`SOPS binary not found. Install with: curl -LO https://github.com/mozilla/sops/releases/download/v3.7.3/sops-v3.7.3.linux.amd64 && sudo mv sops-v3.7.3.linux.amd64 /usr/local/bin/sops && sudo chmod +x /usr/local/bin/sops`);
+  }
+};
+
+/**
+ * Decrypt SOPS file with Windows-specific optimizations
+ */
+const decryptSopsWindows = (sopsPath: string, secretsPath: string, gpgPassphrase: string): string => {
+  console.log('?? Windows SOPS decryption with optimizations...');
+  
+  // Pre-cache GPG passphrase
+  try {
+    execSync(`echo test | gpg --sign --armor --batch --yes --passphrase "${gpgPassphrase}" --pinentry-mode loopback`, {
+      stdio: 'pipe',
+      timeout: 10000,
+      env: {
+        ...process.env,
+        GNUPGHOME: process.env.GNUPGHOME || path.join(os.homedir(), '.gnupg'),
+      }
+    });
+    console.log('? GPG passphrase cached successfully');
+  } catch (error) {
+    console.warn('?? GPG pre-cache failed:', (error as Error).message);
+  }
+  
+  // Execute SOPS
+  const decryptOutput = execSync(`"${sopsPath}" -d --output-type json "${secretsPath}"`, {
+    encoding: 'utf8',
+    timeout: 30000,
+    env: {
+      ...process.env,
+      GNUPGHOME: process.env.GNUPGHOME || path.join(os.homedir(), '.gnupg'),
+      GPG_PASSPHRASE: gpgPassphrase
+    },
+    stdio: ['pipe', 'pipe', 'pipe']
+  });
+  
+  console.log('? SOPS decryption successful (Windows)');
+  return decryptOutput;
+};
+
+/**
+ * Decrypt SOPS file with Linux-specific optimizations (GPG POPUP KILLER)
+ */
+const decryptSopsLinux = (sopsPath: string, secretsPath: string, gpgPassphrase: string): string => {
+  console.log('?? Linux SOPS decryption starting (killing GPG popups)...');
+  
+  try {
+    // Method 1: FORCE GPG to use our passphrase (NO POPUPS!)
+    const result = execSync(`"${sopsPath}" -d --output-type json "${secretsPath}"`, {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GPG_PASSPHRASE: gpgPassphrase,
+        GPG_TTY: '/dev/null',              // ? KILL TTY
+        DISPLAY: '',                       // ? KILL X11 POPUPS  
+        GPG_AGENT_INFO: '',               // ? DISABLE AGENT
+        GPG_BATCH: '1',                   // ? BATCH MODE
+        GNUPGHOME: process.env.GNUPGHOME || path.join(os.homedir(), '.gnupg')
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 30000
+    });
+    
+    console.log('? SOPS decryption successful (Linux Method 1 - No popups)');
+    return result;
+    
+  } catch (error1) {
+    console.log('?? Method 1 failed, trying Method 2 (pipe passphrase)...');
+    
+    try {
+      // Method 2: Pipe passphrase directly + kill all interactive stuff
+      const result = execSync(`echo "${gpgPassphrase}" | "${sopsPath}" -d --output-type json "${secretsPath}"`, {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GPG_BATCH: '1',
+          GPG_USE_AGENT: '0',              // ? NO AGENT
+          GPG_TTY: '/dev/null',            // ? NO TTY
+          DISPLAY: '',                     // ? NO X11
+          GNUPGHOME: process.env.GNUPGHOME || path.join(os.homedir(), '.gnupg')
+        },
+        stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: 30000,
+        shell: '/bin/bash'
+      });
+      
+      console.log('? SOPS decryption successful (Linux Method 2 - Piped passphrase)');
+      return result;
+      
+    } catch (error2) {
+      console.log('?? Method 2 failed, trying Method 3 (hardcore script)...');
+      
+      try {
+        // Method 3: Nuclear option - script with ALL GPG popup killers
+        const tempScript = path.join(os.tmpdir(), `decrypt-${Date.now()}.sh`);
+        const scriptContent = `#!/bin/bash
+# NUCLEAR GPG POPUP KILLER SCRIPT
+export GNUPGHOME="${process.env.GNUPGHOME || path.join(os.homedir(), '.gnupg')}"
+export GPG_BATCH=1
+export GPG_USE_AGENT=0
+export GPG_TTY=/dev/null
+export DISPLAY=""
+export GPG_AGENT_INFO=""
+unset SSH_AGENT_PID
+unset SSH_AUTH_SOCK
+# Pre-load passphrase into gpg-agent cache
+echo "test" | gpg --batch --yes --passphrase "${gpgPassphrase}" --pinentry-mode loopback --symmetric --cipher-algo AES256 --output /dev/null 2>/dev/null || true
+# Now decrypt with SOPS
+echo "${gpgPassphrase}" | "${sopsPath}" -d --output-type json "${secretsPath}"`;
+        
+        fs.writeFileSync(tempScript, scriptContent, { mode: 0o755 });
+        
+        const result = execSync(`bash "${tempScript}"`, {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            GPG_BATCH: '1',
+            GPG_USE_AGENT: '0',
+            GPG_TTY: '/dev/null',
+            DISPLAY: ''
+          },
+          stdio: ['pipe', 'pipe', 'pipe'],
+          timeout: 30000
+        });
+        
+        // Clean up immediately
+        fs.unlinkSync(tempScript);
+        
+        console.log('? SOPS decryption successful (Linux Method 3 - Nuclear option)');
+        return result;
+        
+      } catch (error3) {
+        // Clean up script if it exists
+        const tempScript = path.join(os.tmpdir(), `decrypt-${Date.now()}.sh`);
+        if (fs.existsSync(tempScript)) {
+          fs.unlinkSync(tempScript);
+        }
+        
+        console.error('? All SOPS decryption methods failed on Linux (even the nuclear option):');
+        console.error('   Method 1 (env):', (error1 as Error).message.substring(0, 200));
+        console.error('   Method 2 (echo):', (error2 as Error).message.substring(0, 200));
+        console.error('   Method 3 (nuclear):', (error3 as Error).message.substring(0, 200));
+        console.error('?? Try running: gpgconf --kill gpg-agent && gpg-agent --daemon');
+        
+        throw new Error('SOPS decryption failed with all methods on Linux. GPG is being stubborn.');
+      }
+    }
+  }
+};
+
+/**
+ * Standalone config loading with cross-platform SOPS support
+ */
+const loadStandaloneConfig = async () => {
+  console.log('?? Loading config via SOPS from local repo (Standalone Mode)');
+  
+  const clientId = getClientId();
+  const gpgPassphrase = getGPGPassphrase();
+  
+  // Use local core-envs-private repo (sibling directory)
+  const envsRepoPath = path.resolve(__dirname, '../../../core-envs-private');
+  
+  if (!fs.existsSync(envsRepoPath)) {
+    throw new Error(`core-envs-private repo not found at: ${envsRepoPath}`);
+  }
+  
+  console.log(`?? Using local repo: ${envsRepoPath}`);
+  console.log(`??? Platform: ${process.platform}`);
+  
+  try {
+    // 1. Load config.yaml (non-encrypted)
+    const yamlPath = path.join(envsRepoPath, `clients/${clientId}/config.yaml`);
+    if (!fs.existsSync(yamlPath)) {
+      throw new Error(`Client config.yaml not found: ${clientId}`);
+    }
+    
+    const yamlFile = fs.readFileSync(yamlPath, 'utf8');
+    const yamlParsed = yaml.load(yamlFile) as Record<string, any>;
+    
+    const yamlConfig = Object.entries(yamlParsed).reduce((acc, [key, value]) => {
+      const camelKey = key.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+      acc[camelKey] = value;
+      return acc;
+    }, {} as Record<string, any>);
+    
+    console.log('? config.yaml loaded successfully');
+    
+    // 2. Load and decrypt secrets.sops.yaml IN MEMORY
+    const secretsPath = path.join(envsRepoPath, `clients/${clientId}/secrets.sops.yaml`);
+    if (!fs.existsSync(secretsPath)) {
+      throw new Error(`Client secrets.sops.yaml not found: ${clientId}`);
+    }
+    
+    console.log(`?? Decrypting secrets for client: ${clientId} (${process.platform})`);
+    
+    // Get platform-specific SOPS path
+    const sopsPath = getSopsPath(envsRepoPath);
+    console.log(`?? Using SOPS binary: ${sopsPath}`);
+    
+    // Decrypt using platform-specific method
+    let decryptOutput: string;
+    if (process.platform === 'win32') {
+      decryptOutput = decryptSopsWindows(sopsPath, secretsPath, gpgPassphrase);
+    } else {
+      decryptOutput = decryptSopsLinux(sopsPath, secretsPath, gpgPassphrase);
+    }
+    
+    const secretsConfig = JSON.parse(decryptOutput);
+    console.log('? Secrets decrypted successfully in memory');
+    
+    // 3. Merge configs (secrets override yaml)
+    const mergedConfig = {
+      ...yamlConfig,
+      ...secretsConfig,
+      // Map snake_case to camelCase
+      senderEmail: secretsConfig.sender_email ?? yamlConfig.senderEmail ?? '',
+      clientId: secretsConfig.client_id ?? yamlConfig.clientId ?? '',
+      clientSecret: secretsConfig.client_secret ?? yamlConfig.clientSecret ?? '',
+      tenantId: secretsConfig.tenant_id ?? yamlConfig.tenantId ?? '',
+      refreshToken: secretsConfig.refresh_token ?? yamlConfig.refreshToken ?? '',
+      tenantClientId: secretsConfig.tenant_client_id ?? yamlConfig.tenantClientId ?? '',
+      tokenEndpoint: secretsConfig.token_endpoint ?? yamlConfig.tokenEndpoint ?? 'https://login.microsoftonline.com',
+      jwtSecret: secretsConfig.jwt_secret ?? yamlConfig.jwtSecret ?? '',
+      internalJwtSecret: secretsConfig.internal_jwt_secret ?? yamlConfig.internalJwtSecret ?? '',
+      authUsername: secretsConfig.auth_username ?? yamlConfig.authUsername,
+      authPassword: secretsConfig.auth_password ?? yamlConfig.authPassword,
+      
+      // Composed URLs
+      coreApiHost: yamlConfig.coreApiHost ?? '',
+      servicesPort: yamlConfig.servicesPort ?? '',
+      authUrl: yamlConfig.authUrl ?? '',
+      backendUrl: yamlConfig.backendUrl ?? '',
+      apiUrl: `${yamlConfig.coreApiHost}:${yamlConfig.servicesPort}${yamlConfig.backendUrl}`,
+      authFullUrl: `${yamlConfig.coreApiHost}:${yamlConfig.servicesPort}${yamlConfig.authUrl}`,
+      
+      // Certificate config
+      certPdfSignType: yamlConfig.certPdfSignType ?? 'p12',
+      certPdfSignPath: secretsConfig.cert_pdf_sign_path ?? yamlConfig.certPdfSignPath ?? '',
+      certPdfSignPassword: secretsConfig.cert_pdf_sign_password ?? yamlConfig.certPdfSignPassword ?? '',
+      
+      // Mark as standalone mode
+      standalone_mode: true,
+      config_source: `SOPS_LOCAL_${process.platform.toUpperCase()}`
+    };
+    
+    console.log(`? Config loaded successfully in standalone mode (${process.platform})`);
+    console.log('?? All secrets loaded in memory - no plaintext files created');
+    
+    return mergedConfig;
+    
+  } catch (error) {
+    console.error(`? Standalone config loading failed on ${process.platform}:`, (error as Error).message);
+    throw error;
+  }
+};
+
+/**
+ * Traditional mode (unchanged)
+ */
+const loadTraditionalConfig = () => {
+  console.log('?? Loading config via .env + YAML (traditional mode)');
+  
+  const envPath = path.resolve(__dirname, '../.env');
+  if (fs.existsSync(envPath)) {
+    // Read .env manually to avoid dotenv dependency in standalone
+    const envContent = fs.readFileSync(envPath, 'utf8');
+    const envVars = envContent
+      .split('\n')
+      .filter(line => line.includes('=') && !line.startsWith('#'))
+      .reduce((acc, line) => {
+        const [key, ...valueParts] = line.split('=');
+        const value = valueParts.join('=').trim();
+        acc[key.trim()] = value.replace(/^["']|["']$/g, ''); // Remove quotes
+        return acc;
+      }, {} as Record<string, string>);
+    
+    // Set environment variables
+    Object.assign(process.env, envVars);
+    console.log(`? Loaded .env from: ${envPath}`);
+  } else {
+    console.warn(`?? .env not found at: ${envPath}`);
+  }
+
+  const clientId = getClientId();
+  const yamlPath = path.resolve(__dirname, `../../../core-envs-private/clients/${clientId}/config.yaml`);
+  let yamlConfig: Record<string, any> = {};
+  
+  try {
+    const file = fs.readFileSync(yamlPath, 'utf8');
+    const parsed = yaml.load(file) as Record<string, any>;
+    
+    yamlConfig = Object.entries(parsed).reduce((acc, [key, value]) => {
+      const camelKey = key.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+      acc[camelKey] = value;
+      return acc;
+    }, {} as Record<string, any>);
+    
+    console.log(`? Loaded config.yaml from: ${yamlPath}`);
+  } catch (err) {
+    console.warn(`?? Failed to load config.yaml at ${yamlPath}:`, err);
+  }
+
+  return {
+    ...yamlConfig,
+    senderEmail: process.env.sender_email ?? yamlConfig.senderEmail ?? '',
+    clientId: process.env.client_id ?? yamlConfig.clientId ?? '',
+    clientSecret: process.env.client_secret ?? yamlConfig.clientSecret ?? '',
+    tenantId: process.env.tenant_id ?? yamlConfig.tenantId ?? '',
+    refreshToken: process.env.refresh_token ?? yamlConfig.refreshToken ?? '',
+    tenantClientId: process.env.tenant_client_id ?? yamlConfig.tenantClientId ?? '',
+    tokenEndpoint: process.env.token_endpoint ?? yamlConfig.tokenEndpoint ?? 'https://login.microsoftonline.com',
+    jwtSecret: process.env.jwt_secret ?? yamlConfig.jwtSecret ?? '',
+    internalJwtSecret: process.env.internal_jwt_secret ?? yamlConfig.internalJwtSecret ?? '',
+    authUsername: process.env.auth_username ?? yamlConfig.authUsername,
+    authPassword: process.env.auth_password ?? yamlConfig.authPassword,
+    
+    coreApiHost: yamlConfig.coreApiHost ?? '',
+    servicesPort: yamlConfig.servicesPort ?? '',
+    authUrl: yamlConfig.authUrl ?? '',
+    backendUrl: yamlConfig.backendUrl ?? '',
+    apiUrl: `${yamlConfig.coreApiHost}:${yamlConfig.servicesPort}${yamlConfig.backendUrl}`,
+    authFullUrl: `${yamlConfig.coreApiHost}:${yamlConfig.servicesPort}${yamlConfig.authUrl}`,
+    certPdfSignType: yamlConfig.certPdfSignType ?? 'p12',
+    certPdfSignPath: process.env.cert_pdf_sign_path ?? yamlConfig.certPdfSignPath ?? '',
+    certPdfSignPassword: process.env.cert_pdf_sign_password ?? yamlConfig.certPdfSignPassword ?? '',
+    
+    standalone_mode: false,
+    config_source: 'ENV_YAML'
+  };
+};
+
+/**
+ * Main config loader
+ */
+const loadConfig = async () => {
+  const mode = getConfigMode();
+  
+  switch (mode) {
+    case 'standalone':
+      return await loadStandaloneConfig();
+    case 'traditional':
+      return loadTraditionalConfig();
+    default:
+      throw new Error(`Unknown config mode: ${mode}`);
+  }
+};
+
+/**
+ * Get client ID from multiple sources
+ */
+const getClientId = (): string => {
+  // 1. CLI argument
+  const cliArgs = process.argv.slice(2);
+  const cliClientId = cliArgs.find(arg => !arg.startsWith('--'));
+  
+  if (cliClientId) {
+    console.log(`?? Using CLIENT_ID from CLI: ${cliClientId}`);
+    return cliClientId;
+  }
+  
+  // 2. Environment variable
+  if (process.env.CLIENT_ID) {
+    console.log(`?? Using CLIENT_ID from ENV: ${process.env.CLIENT_ID}`);
+    return process.env.CLIENT_ID;
+  }
+  
+  // 3. Windows Registry (Windows Service only)
+  if (process.platform === 'win32' && process.env.NODE_ENV === 'production') {
+    try {
+      const regValue = execSync(
+        'reg query "HKLM\\SOFTWARE\\CoreServices" /v ClientID 2>nul', 
+        { encoding: 'utf8', timeout: 5000 }
+      );
+      const match = regValue.match(/ClientID\s+REG_SZ\s+(.+)/);
+      if (match) {
+        const clientId = match[1].trim();
+        console.log(`?? Using CLIENT_ID from Windows Registry: ${clientId}`);
+        return clientId;
+      }
+    } catch (error) {
+      console.warn('?? Could not read CLIENT_ID from Windows Registry');
+    }
+  }
+  
+  // 4. Default fallback
+  console.log(`?? Using default CLIENT_ID: core-dev`);
+  return 'core-dev';
+};
+
+// Export async config loader
+export const getConfig = loadConfig;
+export const getConfigAsync = loadConfig;
+
+// No sync initialization for standalone mode
+export default null;
+// config/internalToken.ts
+import jwt from 'jsonwebtoken';
+
+const SECRET = process.env.JWT_SECRET || 'default_secret_dangerous';
+
+export const getInternalToken = (): string => {
+  return jwt.sign(
+    { username: 'core_services', role: 'admin' },
+    SECRET,
+    { expiresIn: '1h' }
+  );
+};
+
+// controllers/authController.ts
+import { Request, Response } from 'express';
+import jwt from 'jsonwebtoken';
+import bcrypt from 'bcrypt';
+import rawUsers from '../config/users.json';
+import { getServiceContainer } from '../services/serviceContainer';
+
+// Define the shape of each user record
+interface UserRecord {
+  password: string;  // hashed password
+  role: string;      // user role, e.g., 'admin', 'viewer'
+}
+
+// Apply type to the users object
+const users: Record<string, UserRecord> = rawUsers;
+
+export const login = async (req: Request, res: Response) => {
+  const { username, password } = req.body;
+
+  // Validate input presence
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Username and password are required' });
+  }
+
+  const user = users[username];
+
+  // Check if user exists
+  if (!user) {
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
+
+  // Validate password using bcrypt
+  const passwordMatch = await bcrypt.compare(password, user.password);
+  if (!passwordMatch) {
+    return res.status(401).json({ error: 'Invalid credentials' });
+  }
+
+  try {
+    // Get JWT secret from service container (works in both modes)
+    const container = getServiceContainer();
+    const jwtSecret = container.getJwtSecret();
+
+    // Generate JWT token with role using the same secret as middleware
+    const token = jwt.sign({ username, role: user.role }, jwtSecret, { expiresIn: '15m' });
+
+    // Return the token to the client
+    res.json({ token });
+    
+  } catch (error) {
+    console.error('Failed to generate JWT token:', error);
+    return res.status(500).json({ error: 'Failed to generate authentication token' });
+  }
+};
+// controllers/email/abacSend.ts
+// src/controllers/email/abacSend.ts
+
+import { Request, Response, NextFunction } from "express";
+import { enforceEmailPolicy } from "../../services/pep";
+import { EmailParams } from "../../services/email/emailService";
+import { sendEmailWithConfig } from "../../services/email/emailServiceHelpers";
+import {
+  signPDFAttachments,
+  getSignedAttachments,
+  validateSigningResults,
+} from "../../services/email/pdfSigningService";
+import logger from "../../utils/logging";
+import { v4 as uuidv4 } from "uuid";
+import {
+  ISO27001Classification,
+  getSecurityControls,
+} from "../../types/iso27001";
+
+/**
+ * ISO 27001 Compliant ABAC Email Send Controller
+ *
+ * This controller implements Zero Trust architecture with ISO 27001 compliance:
+ * - A.8.2.1: Information classification handling
+ * - A.9.4.1: Information access restriction
+ * - A.12.4.1: Event logging and audit trail
+ * - A.13.2.1: Information transfer policies
+ * - A.13.2.3: Electronic messaging with digital signatures
+ *
+ * Security Flow based on ISO classification:
+ * - internal: Single GDPR validation
+ * - confidential: Double GDPR validation
+ * - restricted: Double validation + digital PDF signing
+ *
+ * Zero Trust Principle: Don't trust the caller, don't trust yourself.
+ */
+export const abacSend = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  const trace_id = uuidv4();
+  const gdpr_token = req.headers["gdpr-token"] || req.body?.gdpr_token;
+  const classification: ISO27001Classification =
+    req.body?.classification || "restricted";
+
+  logger.info("ISO 27001 compliant ABAC email process started", {
+    trace_id,
+    step: "PROCESS_START",
+    classification,
+    has_gdpr_token: !!gdpr_token,
+    iso_control: "A.8.2.1", // Information classification
+  });
+
+  // Validate GDPR token presence (A.9.4.1 - Information access restriction)
+  if (typeof gdpr_token !== "string") {
+    logger.warn("Missing or invalid gdpr_token", {
+      trace_id,
+      step: "GDPR_TOKEN_VALIDATION_FAILED",
+      iso_control: "A.9.4.1",
+    });
+
+    return res.status(400).json({
+      trace_id,
+      error: "Missing or invalid gdpr_token",
+      iso_control: "A.9.4.1",
+    });
+  }
+
+  // Get ISO 27001 security controls for this classification level
+  const securityControls = getSecurityControls(classification);
+
+  logger.info("ISO 27001 security controls determined", {
+    trace_id,
+    classification,
+    security_controls: securityControls,
+    iso_control: "A.8.2.1",
+  });
+
+  try {
+    // STEP 1: First GDPR validation (A.9.4.1 - Information access restriction)
+    logger.info("Starting first GDPR validation", {
+      trace_id,
+      step: "FIRST_VALIDATION_START",
+      iso_control: "A.9.4.1",
+    });
+
+    const firstValidation = enforceEmailPolicy(req.body, gdpr_token);
+
+    if (!firstValidation.allowed) {
+      logger.warn("First validation failed - Original payload rejected", {
+        trace_id,
+        step: "FIRST_VALIDATION_FAILED",
+        reason: firstValidation.reason,
+        hash: firstValidation.hash,
+        iso_control: "A.9.4.1",
+      });
+
+      return res.status(403).json({
+        trace_id,
+        error: "Email not allowed by policy (first validation)",
+        reason: firstValidation.reason,
+        iso_control: "A.9.4.1",
+      });
+    }
+
+    logger.info("First validation passed - Original payload approved", {
+      trace_id,
+      step: "FIRST_VALIDATION_SUCCESS",
+      hash: firstValidation.hash,
+      iso_control: "A.9.4.1",
+    });
+
+    let finalPayload = req.body;
+    let secondValidation = firstValidation; // Default for 'internal' classification
+
+    // STEP 2: PDF Signing and Double Validation (based on ISO classification)
+    if (securityControls.electronicMessaging) {
+      // A.13.2.3 - Electronic messaging: Digital signatures required for 'restricted'
+      logger.info(
+        "Starting PDF signing process for restricted classification",
+        {
+          trace_id,
+          step: "PDF_SIGNING_START",
+          attachment_count: req.body.attachments?.length || 0,
+          iso_control: "A.13.2.3",
+        }
+      );
+
+      finalPayload = await createPayloadWithSignedPDFs(req.body, trace_id);
+
+      logger.info("PDF signing completed", {
+        trace_id,
+        step: "PDF_SIGNING_SUCCESS",
+        signed_attachment_count: finalPayload.attachments?.length || 0,
+        iso_control: "A.13.2.3",
+      });
+    }
+
+    if (securityControls.informationTransfer) {
+      // A.13.2.1 - Information transfer: Double validation for 'confidential' and 'restricted'
+      logger.info("Starting second GDPR validation for enhanced security", {
+        trace_id,
+        step: "SECOND_VALIDATION_START",
+        iso_control: "A.13.2.1",
+      });
+
+      secondValidation = enforceEmailPolicy(finalPayload, gdpr_token);
+
+      if (!secondValidation.allowed) {
+        logger.error("Second validation failed - Enhanced payload rejected", {
+          trace_id,
+          step: "SECOND_VALIDATION_FAILED",
+          reason: secondValidation.reason,
+          hash: secondValidation.hash,
+          original_hash: firstValidation.hash,
+          iso_control: "A.13.2.1",
+        });
+
+        return res.status(403).json({
+          trace_id,
+          error: "Email not allowed by policy (second validation)",
+          reason: secondValidation.reason,
+          details: "Enhanced payload differs from consented content",
+          iso_control: "A.13.2.1",
+        });
+      }
+
+      logger.info("Second validation passed - Enhanced payload approved", {
+        trace_id,
+        step: "SECOND_VALIDATION_SUCCESS",
+        hash: secondValidation.hash,
+        iso_control: "A.13.2.1",
+      });
+    }
+
+    // STEP 3: Send Email with ISO classification (A.12.4.1 - Event logging)
+    logger.info("Starting ISO 27001 compliant email send", {
+      trace_id,
+      step: "EMAIL_SEND_START",
+      classification,
+      iso_control: "A.12.4.1",
+    });
+
+    // Add classification to payload for email service
+    const emailPayload: EmailParams = {
+      ...finalPayload,
+      classification,
+    };
+
+    // Use the clean DI helper function
+    const emailStatus = await sendEmailWithConfig(emailPayload, trace_id);
+
+    // A.12.4.1 - Event logging: Complete audit trail
+    logger.info("ISO 27001 compliant email sent successfully", {
+      trace_id,
+      step: "EMAIL_SEND_SUCCESS",
+      user_id: process.env.TENANT_CLIENT_ID,
+      gdpr_token,
+      classification,
+      security_controls: securityControls,
+      first_hash: firstValidation.hash,
+      second_hash: secondValidation.hash,
+      email_status: emailStatus,
+      status: "DELIVERED",
+      iso_controls: ["A.8.2.1", "A.9.4.1", "A.12.4.1", "A.13.2.1"],
+    });
+
+    res.status(200).json({
+      trace_id,
+      message: "Email sent with ISO 27001 compliance",
+      status: "success",
+      classification,
+      security_controls: securityControls,
+      validations: {
+        first_hash: firstValidation.hash,
+        second_hash: secondValidation.hash,
+        both_passed: true,
+        double_validation_applied: securityControls.informationTransfer,
+      },
+      email_status: emailStatus,
+      iso_controls: ["A.8.2.1", "A.9.4.1", "A.12.4.1", "A.13.2.1"],
+    });
+  } catch (err) {
+    // A.12.4.1 - Event logging: Critical error logging
+    logger.error("Critical error in ISO 27001 compliant ABAC email process", {
+      trace_id,
+      step: "CRITICAL_ERROR",
+      classification,
+      error: (err as Error).message,
+      stack: (err as Error).stack,
+      iso_control: "A.12.4.1",
+    });
+
+    logger.debug("Critical error details", { trace_id, error_details: err });
+
+    // 🎯 VERIFICAR SI ES UN ERROR ESTRUCTURADO DEL EMAIL SERVICE
+    const error = err as any;
+    const statusCode = error.statusCode || 500;
+
+    if (error.details && error.userAction) {
+      // Error estructurado con información útil
+      return res.status(statusCode === 403 ? 403 : 500).json({
+        trace_id,
+        error: error.message,
+        details: error.details,
+        user_action: error.userAction,
+        ...(error.graphErrorCode && { graph_error_code: error.graphErrorCode }),
+        iso_control: "A.12.4.1",
+        timestamp: new Date().toISOString(),
+      });
+    } else {
+      // Error genérico sin estructura
+      return res.status(500).json({
+        trace_id,
+        error: (err as Error).message,
+        details: `An unexpected error occurred. Check logs for trace_id: ${trace_id}`,
+        user_action: "Contact system administrator if the problem persists",
+        iso_control: "A.12.4.1",
+        timestamp: new Date().toISOString(),
+      });
+    }
+  }
+};
+
+/**
+ * Creates a new email payload with all PDF attachments digitally signed
+ *
+ * This function implements ISO 27001 A.13.2.3 (Electronic messaging)
+ * by applying digital signatures to PDF documents for data integrity
+ * and authenticity verification.
+ *
+ * @param originalPayload - Original email payload from PLSQL call
+ * @param trace_id - Trace ID for logging and audit trail (A.12.4.1)
+ * @returns New payload with signed PDF attachment paths
+ * @throws Error if PDF signing fails (fail-fast for security)
+ */
+async function createPayloadWithSignedPDFs(
+  originalPayload: EmailParams,
+  trace_id: string
+): Promise<EmailParams> {
+  // If no attachments, return original payload unchanged
+  if (
+    !originalPayload.attachments ||
+    originalPayload.attachments.length === 0
+  ) {
+    logger.info("No attachments to process for digital signing", {
+      trace_id,
+      step: "NO_ATTACHMENTS",
+      iso_control: "A.13.2.3",
+    });
+    return originalPayload;
+  }
+
+  logger.info("Processing attachments for ISO 27001 compliant PDF signing", {
+    trace_id,
+    step: "PROCESSING_ATTACHMENTS",
+    original_attachment_count: originalPayload.attachments.length,
+    iso_control: "A.13.2.3",
+  });
+
+  // Sign all PDF attachments using the dedicated PDF signing service
+  const signingResults = await signPDFAttachments(
+    originalPayload.attachments,
+    trace_id
+  );
+
+  // Validate that all expected PDFs were signed successfully (A.13.2.3)
+  // This will throw an error if any PDF that should have been signed wasn't
+  validateSigningResults(signingResults, trace_id);
+
+  // Extract the final list of attachments (signed PDFs + unchanged non-PDFs)
+  const finalAttachments = getSignedAttachments(signingResults);
+
+  logger.info("ISO 27001 PDF signing validation completed", {
+    trace_id,
+    step: "SIGNING_VALIDATION_SUCCESS",
+    original_count: originalPayload.attachments.length,
+    final_count: finalAttachments.length,
+    signed_pdfs: signingResults.filter((r) => r.wasSigned).length,
+    iso_control: "A.13.2.3",
+  });
+
+  // Return new payload with signed attachment paths
+  // This will generate a different hash than the original payload for second validation
+  return {
+    ...originalPayload,
+    attachments: finalAttachments,
+  };
+}
+
+// middlewares/allowGetPostOnly.ts
+import { Request, Response, NextFunction } from 'express';
+
+export function allowGetPostOnly(req: Request, res: Response, next: NextFunction) {
+  if (req.method !== 'GET' && req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method Not Allowed' });
+  }
+  next();
+}
+
+// middlewares/authenticateJWT.ts
+import { Request, Response, NextFunction } from 'express';
+import jwt from 'jsonwebtoken';
+
+/**
+ * JWT Authentication middleware factory
+ * Returns a middleware function configured with the provided JWT secret
+ */
+export function createAuthenticateJWT(jwtSecret: string) {
+  return function authenticateJWT(req: Request, res: Response, next: NextFunction) {
+    const authHeader = req.headers.authorization;
+    
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ message: 'Missing or invalid token' });
+    }
+    
+    const token = authHeader.split(' ')[1];
+    
+    try {
+      const user = jwt.verify(token, jwtSecret);
+      (req as any).user = user;
+      next();
+    } catch {
+      res.status(403).json({ message: 'Token verification failed' });
+    }
+  };
+}
+// middlewares/authorizeAdmin.ts
+import { Request, Response, NextFunction } from 'express';
+
+export function authorizeAdmin(req: Request, res: Response, next: NextFunction) {
+  const user = (req as any).user;
+  if (!user || user.role !== 'admin') {
+    return res.status(403).json({ message: 'Access denied' });
+  }
+  next();
+}
+
+// middlewares/errorHandler.ts
+import { Request, Response, NextFunction } from 'express';
+
+export function errorHandler(err: any, req: Request, res: Response, next: NextFunction) {
+  console.error(`[ErrorHandler] ${err.message || err}`);
+  res.status(500).json({ error: 'Internal server error' });
+}
+
+// middlewares/index.ts
+export { traceId } from './traceId';
+export { validateToken } from './validateToken';
+export { rateLimiter } from './rateLimiter';
+export { validateBody } from './validateBody';
+export { securityHeaders } from './securityHeaders';
+export { errorHandler } from './errorHandler';
+export { allowGetPostOnly } from './allowGetPostOnly';
+export { createAuthenticateJWT } from './authenticateJWT';
+export { authorizeAdmin } from './authorizeAdmin';
+// middlewares/rateLimiter.ts
+import rateLimit from 'express-rate-limit';
+
+export const rateLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minuto
+  max: 100,             // 100 peticiones por minuto
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+// middlewares/securityHeaders.ts
+import { Request, Response, NextFunction } from 'express';
+
+export function securityHeaders(req: Request, res: Response, next: NextFunction) {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-XSS-Protection', '1; mode=block');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  next();
+}
+
+// middlewares/traceId.ts
+import { Request, Response, NextFunction } from 'express';
+import { v4 as uuidv4 } from 'uuid';
+
+export function traceId(req: Request, res: Response, next: NextFunction) {
+  const incomingTraceId = req.headers['x-trace-id'] as string;
+  const newTraceId = incomingTraceId || uuidv4();
+  (req as any).trace_id = newTraceId;
+  res.setHeader('x-trace-id', newTraceId);
+  next();
+}
+
+// middlewares/validateBody.ts
+import { Request, Response, NextFunction } from 'express';
+import { ZodSchema } from 'zod';
+
+export function validateBody(schema: ZodSchema) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const result = schema.safeParse(req.body);
+    if (!result.success) {
+      return res.status(400).json({ error: 'Validation error', issues: result.error.issues });
+    }
+    next();
+  };
+}
+
+// middlewares/validateToken.ts
+import { Request, Response, NextFunction } from 'express';
+import { getInternalToken } from '../config/internalToken';
+
+export function validateToken(req: Request, res: Response, next: NextFunction) {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  const expectedToken = getInternalToken();
+
+  if (token !== expectedToken) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  next();
+}
+
+// routes/authRoutes.ts
+import express from 'express';
+import { login } from '../controllers/authController';
+
+const router = express.Router();
+
+router.post('/login', login);
+
+export default router;
+
+// routes/gdprRoutes.ts
+// routes/gdprRoutes.ts
+
+import express from 'express';
+import { getGDPRService, GDPRTokenRequest } from '../services/gdpr/gdprTokenService';
+import { generatePayloadHash } from '../utils/hashUtils';
+import { z } from 'zod';
+import logger from '../utils/logging';
+import { v4 as uuidv4 } from 'uuid';
+
+const router = express.Router();
+
+/**
+ * Schema for GDPR token generation request
+ */
+const GDPRTokenRequestSchema = z.object({
+  recipient_email: z.string().email('Invalid email format'),
+  purpose: z.string().min(1, 'Purpose is required').default('email_notification'),
+  email_payload: z.object({
+    to: z.string(),
+    subject: z.string(),
+    body: z.string(),
+    classification: z.string().optional(),
+    attachments: z.array(z.object({
+      name: z.string(),
+      path: z.string()
+    })).optional()
+  }),
+  expires_in_hours: z.number().min(1).max(168).default(24), // Max 1 week
+  user_id: z.string().optional(),
+  client_id: z.string().optional()
+});
+
+
+
+/**
+ * POST /gdpr/generate-token
+ * Generate a new GDPR consent token for email sending
+ */
+router.post('/generate-token', async (req, res) => {
+  const trace_id = uuidv4();
+  
+  try {
+    logger.system('GDPR token generation requested', {
+      trace_id,
+      ip: req.ip,
+      user_agent: req.get('User-Agent')
+    });
+    
+    // Validate request
+    const validation = GDPRTokenRequestSchema.safeParse(req.body);
+    if (!validation.success) {
+      logger.warn('GDPR token generation failed - validation error', {
+        trace_id,
+        errors: validation.error.issues
+      });
+      
+      return res.status(400).json({
+        trace_id,
+        error: 'Validation failed',
+        details: validation.error.issues
+      });
+    }
+    
+    const { 
+      recipient_email, 
+      purpose, 
+      email_payload, 
+      expires_in_hours, 
+      user_id, 
+      client_id 
+    } = validation.data;
+    
+    // Generate consistent hash of the email payload
+    const payload_hash = generatePayloadHash(email_payload);
+    
+    logger.system('Generated payload hash for GDPR token', {
+      trace_id,
+      recipient_email,
+      payload_hash: payload_hash.substring(0, 16) + '...',
+      payload_keys: Object.keys(email_payload)
+    });
+    
+    // Generate GDPR token
+    const gdprService = getGDPRService();
+    const tokenRequest: GDPRTokenRequest = {
+      recipient_email,
+      purpose,
+      payload_hash,
+      expires_in_hours,
+      user_id,
+      client_id
+    };
+    
+    const consentRecord = gdprService.generateToken(tokenRequest);
+    
+    logger.system('GDPR token generated successfully', {
+      trace_id,
+      token_preview: consentRecord.token.substring(0, 8) + '...',
+      recipient_email,
+      expires_at: consentRecord.expires_at
+    });
+    
+    // Return token and metadata
+    res.status(200).json({
+      trace_id,
+      success: true,
+      gdpr_token: consentRecord.token,
+      payload_hash,
+      expires_at: consentRecord.expires_at,
+      recipient_email,
+      purpose,
+      message: 'GDPR consent token generated successfully'
+    });
+    
+  } catch (error) {
+    logger.error('GDPR token generation failed', {
+      trace_id,
+      error: (error as Error).message,
+      stack: (error as Error).stack
+    });
+    
+    res.status(500).json({
+      trace_id,
+      error: 'Failed to generate GDPR token',
+      details: 'Internal server error'
+    });
+  }
+});
+
+/**
+ * GET /gdpr/validate-token/:token
+ * Validate a GDPR token (for debugging/testing)
+ */
+router.get('/validate-token/:token', async (req, res) => {
+  const trace_id = uuidv4();
+  const { token } = req.params;
+  const { payload_hash, recipient_email, purpose } = req.query;
+  
+  try {
+    if (!payload_hash || !recipient_email) {
+      return res.status(400).json({
+        trace_id,
+        error: 'payload_hash and recipient_email query parameters are required'
+      });
+    }
+    
+    const gdprService = getGDPRService();
+    const result = gdprService.validateToken({
+      token,
+      payload_hash: payload_hash as string,
+      recipient_email: recipient_email as string,
+      purpose: purpose as string
+    });
+    
+    res.json({
+      trace_id,
+      valid: result.valid,
+      reason: result.reason,
+      hash_type: result.hash_type
+    });
+    
+  } catch (error) {
+    logger.error('GDPR token validation failed', {
+      trace_id,
+      error: (error as Error).message
+    });
+    
+    res.status(500).json({
+      trace_id,
+      error: 'Failed to validate GDPR token'
+    });
+  }
+});
+
+/**
+ * GET /gdpr/stats
+ * Get GDPR service statistics
+ */
+router.get('/stats', async (req, res) => {
+  const trace_id = uuidv4();
+  
+  try {
+    const gdprService = getGDPRService();
+    const stats = gdprService.getStats();
+    
+    res.json({
+      trace_id,
+      stats,
+      message: 'GDPR service statistics'
+    });
+    
+  } catch (error) {
+    logger.error('Failed to get GDPR stats', {
+      trace_id,
+      error: (error as Error).message
+    });
+    
+    res.status(500).json({
+      trace_id,
+      error: 'Failed to get statistics'
+    });
+  }
+});
+
+export default router;
+// scripts/dev.ts
+// scripts/dev.ts
+import { execSync } from "child_process";
+import * as path from "path";
+import * as fs from "fs";
+
+// Parse arguments
+const args = process.argv.slice(2);
+const clientId = args.find(arg => !arg.startsWith('--'));
+const platformFlag = args.includes("--win") ? "--win" : args.includes("--linux") ? "--linux" : "";
+const shouldDecrypt = args.includes("--decrypt");
+const isStandalone = args.includes("--standalone");
+const gpgPassphraseArg = args.find(arg => arg.startsWith("--gpg-passphrase="));
+
+if (!clientId) {
+  console.error("❌ Missing CLIENT_ID. Usage: npm run dev -- core-dev [--win|--linux] [--decrypt] [--standalone] [--gpg-passphrase=xxx]");
+  process.exit(1);
+}
+
+console.log(`🚀 Starting Core Services for client: ${clientId}`);
+console.log(`🎯 Mode: ${isStandalone ? 'STANDALONE' : 'TRADITIONAL'}`);
+
+// Determine effective platform
+const platform =
+  platformFlag === "--win"
+    ? "win"
+    : platformFlag === "--linux"
+    ? "linux"
+    : process.platform.startsWith("win")
+    ? "win"
+    : "linux";
+
+// 🚀 Smart detection for compiled vs TypeScript execution
+const isCompiled = __filename.endsWith('.js');
+console.log(`🔧 Execution mode: ${isCompiled ? 'COMPILED (JavaScript)' : 'DEVELOPMENT (TypeScript)'}`);
+
+/**
+ * Handle Standalone Mode - No .env files required!
+ */
+if (isStandalone) {
+  console.log("🔒 Standalone mode detected - bypassing .env file requirements");
+  
+  // Set environment variables for standalone mode
+  process.env.CONFIG_MODE = 'standalone';
+  process.env.CLIENT_ID = clientId;
+  
+  // Set GPG passphrase if provided
+  if (gpgPassphraseArg) {
+    const passphrase = gpgPassphraseArg.split('=')[1];
+    process.env.GPG_PASSPHRASE = passphrase;
+    console.log("🔑 GPG passphrase set from CLI argument");
+  }
+  
+  // Verify GPG setup before starting
+  console.log("🔍 Verifying GPG setup...");
+  try {
+    execSync('gpg --list-secret-keys', { stdio: 'pipe' });
+    console.log("✅ GPG keys available");
+  } catch (error) {
+    console.error("❌ GPG setup issue. Make sure GPG is installed and keys are imported.");
+    console.error("Run: gpg --list-secret-keys");
+    process.exit(1);
+  }
+  
+  // Verify SOPS is available
+  const sopsPath = path.resolve(__dirname, "../../../core-envs-private/tools/win64/sops.exe");
+  if (!fs.existsSync(sopsPath) && platform === "win") {
+    console.error(`❌ SOPS not found at: ${sopsPath}`);
+    console.error("Make sure core-envs-private repo is cloned and sops.exe is in tools/win64/");
+    process.exit(1);
+  }
+  
+  console.log("🚀 Starting application in standalone mode...");
+  
+  // 🎯 Smart app path resolution - works for both compiled and TypeScript
+  const appPath = isCompiled 
+    ? path.resolve(__dirname, "../app.js")   // Compiled version in dist/
+    : path.resolve(__dirname, "../app.ts");  // TypeScript version in src/
+  
+  const runCommand = isCompiled
+    ? `node "${appPath}" ${clientId} --standalone`
+    : `ts-node "${appPath}" ${clientId} --standalone`;
+  
+  console.log(`📂 App path: ${appPath}`);
+  console.log(`⚡ Run command: ${runCommand}`);
+  
+  try {
+    execSync(runCommand, { 
+      stdio: "inherit", 
+      shell: platform === "win" ? "cmd.exe" : "/bin/bash",
+      env: process.env // Pass all environment variables including GPG_PASSPHRASE
+    });
+  } catch (error) {
+    console.error("❌ Application failed to start in standalone mode");
+    process.exit(1);
+  }
+  
+  // Exit here - standalone mode is complete
+  process.exit(0);
+}
+
+/**
+ * Handle Traditional Mode - Original logic
+ */
+console.log("📄 Traditional mode - using .env + YAML files");
+
+// Path to core-envs-private repo (assumed sibling of core-services)
+const envsRepo = path.resolve(__dirname, "../../../core-envs-private");
+
+// Path to the secrets file
+const secretsPath = path.join(envsRepo, "clients", clientId, "secrets.sops.yaml");
+
+// Output path for the generated .env file
+const envOutput = path.resolve(__dirname, "../.env");
+
+// SOPS binary path
+const sopsBinary =
+  platform === "win"
+    ? path.join(envsRepo, "tools", "win64", "sops.exe")
+    : "sops";
+
+if (!fs.existsSync(secretsPath)) {
+  console.error(`❌ secrets.sops.yaml not found at: ${secretsPath}`);
+  console.error(`💡 Available clients:`);
+  
+  // List available clients
+  const clientsDir = path.join(envsRepo, "clients");
+  if (fs.existsSync(clientsDir)) {
+    const availableClients = fs.readdirSync(clientsDir, { withFileTypes: true })
+      .filter(dirent => dirent.isDirectory())
+      .map(dirent => dirent.name);
+    
+    availableClients.forEach(client => console.error(`   - ${client}`));
+  }
+  
+  process.exit(1);
+}
+
+if (shouldDecrypt) {
+  try {
+    console.log(`🔐 Decrypting secrets for "${clientId}" using SOPS...`);
+    const command = `"${sopsBinary}" -d "${secretsPath}" > "${envOutput}"`;
+    execSync(command, {
+      stdio: "inherit",
+      shell: platform === "win" ? "cmd.exe" : "/bin/bash",
+    });
+    console.log(`✅ .env file generated at: ${envOutput}`);
+  } catch (error) {
+    console.error("❌ Failed to decrypt secrets with SOPS");
+    console.error("💡 Make sure:");
+    console.error("   1. GPG private key is imported: gpg --list-secret-keys");
+    console.error("   2. You have the correct passphrase");
+    console.error("   3. SOPS binary is available");
+    process.exit(1);
+  }
+} else {
+  if (!fs.existsSync(envOutput)) {
+    console.error(`❌ .env file not found at ${envOutput}. Use --decrypt to generate it.`);
+    console.error(`💡 Run: npm run dev -- ${clientId} --decrypt`);
+    process.exit(1);
+  }
+  console.log(`ℹ️ Using existing .env file at: ${envOutput}`);
+}
+
+// Start the application in traditional mode
+console.log("🚀 Starting application in traditional mode...");
+
+// 🎯 Smart app path resolution for traditional mode too
+const appPath = isCompiled 
+  ? path.resolve(__dirname, "../app.js")   // Compiled version
+  : path.resolve(__dirname, "../app.ts");  // TypeScript version
+
+const runCommand = isCompiled
+  ? `node "${appPath}" ${clientId}`
+  : `ts-node "${appPath}" ${clientId}`;
+
+console.log(`📂 App path: ${appPath}`);
+console.log(`⚡ Run command: ${runCommand}`);
+
+try {
+  execSync(runCommand, { 
+    stdio: "inherit", 
+    shell: platform === "win" ? "cmd.exe" : "/bin/bash" 
+  });
+} catch (error) {
+  console.error("❌ Application failed to start");
+  process.exit(1);
+}
+// services/email/emailService.ts
+// src/services/email/emailService.ts
+
+import axios from 'axios';
+import { promises as fs } from 'fs';
+import path from 'path';
+import { getAccessToken, TokenServiceConfig } from './tokenService';
+import logger from '../../utils/logging';
+
+/**
+ * Email Service - Pure Email Sending with Enhanced Security
+ * 
+ * Single responsibility: Send emails via Microsoft Graph API.
+ * This service doesn't sign PDFs, validate GDPR, or do any business logic.
+ * It just takes email parameters and sends them with maximum security headers.
+ */
+
+export interface EmailAttachment {
+  name: string;
+  path: string;
+}
+
+import { ISO27001Classification } from '../../types/iso27001';
+
+export interface EmailParams {
+  from?: string;
+  to: string;
+  subject: string;
+  body: string;
+  attachments?: EmailAttachment[];
+  // ISO 27001 Annex A.8.2 - Information Classification
+  classification: ISO27001Classification;
+  // Optional parameters
+  importance?: 'low' | 'normal' | 'high';
+  gdpr_token?: string;
+}
+
+export interface EmailServiceConfig extends TokenServiceConfig {
+  senderEmail: string;
+}
+
+/**
+ * Sends an email with the provided parameters via Microsoft Graph API
+ * 
+ * This function assumes:
+ * - All PDFs are already signed (if signing was required)
+ * - All GDPR validation has been completed
+ * - All file paths are valid and accessible
+ * 
+ * Enhanced with security headers for audit trail and compliance.
+ * 
+ * @param emailParams - Email parameters including recipient, subject, body, and attachments
+ * @param trace_id - Trace ID for logging and audit trail
+ * @param config - Email service configuration (senderEmail)
+ * @returns HTTP status code from Microsoft Graph API
+ * @throws Error if email sending fails
+ */
+// services/email/emailService.ts - MANEJO DE ERRORES MEJORADO
+
+export async function sendEmail(
+  { 
+    from, 
+    to, 
+    subject, 
+    body, 
+    attachments = [], 
+    classification,
+    importance = 'normal',
+    gdpr_token
+  }: EmailParams,
+  trace_id: string,
+  config: EmailServiceConfig
+): Promise<number> {
+  
+  logger.info('Starting ISO 27001 compliant email send process', {
+    trace_id,
+    to,
+    from: from || 'using_config_default',
+    subject: subject.substring(0, 50),
+    attachment_count: attachments.length,
+    classification,
+    importance,
+    has_gdpr_token: !!gdpr_token,
+    iso_control: 'A.8.2.1'
+  });
+
+  // Build the Microsoft Graph email payload
+  const emailPayload: any = {
+    message: {
+      subject,
+      body: {
+        contentType: 'Text',
+        content: body
+      },
+      toRecipients: [
+        {
+          emailAddress: {
+            address: to
+          }
+        }
+      ],
+      // Solo agregar 'from' al message si se proporciona
+      ...(from && {
+        from: {
+          emailAddress: {
+            address: from
+          }
+        }
+      }),
+      importance,
+      internetMessageHeaders: buildISO27001SecurityHeaders(trace_id, classification, gdpr_token, attachments)
+    },
+    saveToSentItems: true
+  };
+
+  // Process attachments if any exist
+  if (attachments.length > 0) {
+    emailPayload.message.attachments = await processAttachments(attachments, trace_id);
+  }
+
+  // Get OAuth token for Microsoft Graph
+  const accessToken = await getAccessToken(config);
+  const authenticatedSender = config.senderEmail;
+
+  logger.info('Sending ISO 27001 compliant email via Microsoft Graph API', {
+    trace_id,
+    authenticated_sender: authenticatedSender,
+    message_from: from || 'config_default',
+    to,
+    classification,
+    importance,
+    custom_headers_count: emailPayload.message.internetMessageHeaders.length,
+    api_endpoint: `https://graph.microsoft.com/v1.0/users/${authenticatedSender}/sendMail`,
+    iso_control: 'A.13.2.1'
+  });
+
+  try {
+    const response = await axios.post(
+      `https://graph.microsoft.com/v1.0/users/${authenticatedSender}/sendMail`,
+      emailPayload,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    logger.info('ISO 27001 compliant email sent successfully via Microsoft Graph', {
+      trace_id,
+      to,
+      authenticated_sender: authenticatedSender,
+      message_from: from || 'config_default',
+      status_code: response.status,
+      attachment_count: attachments.length,
+      classification,
+      importance,
+      iso_control: 'A.12.4.1'
+    });
+
+    return response.status;
+
+  } catch (error: any) {
+    // 🎯 MANEJO ESPECÍFICO DE ERRORES DE MICROSOFT GRAPH
+    const statusCode = error.response?.status;
+    const responseData = error.response?.data;
+    const graphError = responseData?.error;
+    
+    logger.error('Failed to send enhanced email via Microsoft Graph', {
+      trace_id,
+      to,
+      authenticated_sender: authenticatedSender,
+      message_from: from || 'config_default',
+      error: error.message,
+      status: statusCode,
+      graph_error_code: graphError?.code,
+      graph_error_message: graphError?.message,
+      response_data: responseData
+    });
+
+    // 🔥 CREAR ERRORES ESPECÍFICOS Y ÚTILES
+    let errorMessage = 'Email sending failed';
+    let errorDetails = '';
+    let userAction = '';
+
+    if (statusCode === 403) {
+      if (graphError?.code === 'Forbidden' || graphError?.message?.includes('Send on behalf')) {
+        errorMessage = 'Email sender not authorized';
+        errorDetails = `The email address '${from || authenticatedSender}' is not authorized to send emails through this system`;
+        userAction = from && from !== authenticatedSender 
+          ? `Either use '${authenticatedSender}' as sender or contact your administrator to authorize '${from}'`
+          : 'Contact your administrator to verify email sending permissions';
+      } else if (graphError?.message?.includes('permission') || graphError?.message?.includes('scope')) {
+        errorMessage = 'Insufficient email permissions';
+        errorDetails = 'The application does not have the required permissions to send emails';
+        userAction = 'Contact your administrator to grant the necessary Microsoft Graph email permissions';
+      } else {
+        errorMessage = 'Email access forbidden';
+        errorDetails = graphError?.message || 'Access to email service was denied';
+        userAction = 'Verify your email permissions with the system administrator';
+      }
+    } else if (statusCode === 401) {
+      errorMessage = 'Email service authentication failed';
+      errorDetails = 'The authentication token is invalid or expired';
+      userAction = 'The system will attempt to refresh the token automatically. If the problem persists, contact support';
+    } else if (statusCode === 400) {
+      errorMessage = 'Invalid email request';
+      errorDetails = graphError?.message || 'The email request contains invalid data';
+      userAction = 'Check your email parameters (recipient, subject, body) and try again';
+    } else if (statusCode === 429) {
+      errorMessage = 'Email service rate limit exceeded';
+      errorDetails = 'Too many emails have been sent in a short period';
+      userAction = 'Wait a few minutes before sending more emails';
+    } else if (statusCode >= 500) {
+      errorMessage = 'Email service temporarily unavailable';
+      errorDetails = 'Microsoft Graph service is experiencing issues';
+      userAction = 'Try again in a few minutes. If the problem persists, contact support';
+    } else {
+      errorMessage = 'Email sending failed';
+      errorDetails = graphError?.message || error.message || 'Unknown error occurred';
+      userAction = 'Check your email parameters and try again';
+    }
+
+    // 🚀 THROW ERROR CON INFORMACIÓN ESTRUCTURADA
+    const enhancedError = new Error(errorMessage);
+    (enhancedError as any).details = errorDetails;
+    (enhancedError as any).userAction = userAction;
+    (enhancedError as any).statusCode = statusCode;
+    (enhancedError as any).graphErrorCode = graphError?.code;
+    (enhancedError as any).traceId = trace_id;
+    
+    throw enhancedError;
+  }
+}
+
+/**
+ * Builds ISO 27001 compliant security headers for email
+ * 
+ * Headers comply with:
+ * - A.8.2.1 (Information classification)
+ * - A.12.4.1 (Event logging)
+ * - A.13.2.1 (Information transfer)
+ * 
+ * Microsoft Graph API limits to 5 headers max, so we prioritize
+ * the most critical ISO 27001 compliance headers.
+ * 
+ * @param trace_id - Unique trace ID for audit trail (A.12.4.1)
+ * @param classification - ISO 27001 information classification (A.8.2.1)
+ * @param gdpr_token - GDPR consent token (if available)
+ * @param attachments - List of attachments for security marking
+ * @returns Array of ISO 27001 compliant email headers
+ */
+function buildISO27001SecurityHeaders(
+  trace_id: string,
+  classification: ISO27001Classification,
+  gdpr_token?: string, 
+  attachments?: EmailAttachment[]
+): Array<{ name: string; value: string }> {
+  
+  // ISO 27001 compliant headers (prioritized for 5-header limit)
+  const headers = [
+    // A.12.4.1 - Event logging: Unique trace ID for audit trail
+    {
+      name: 'X-ISO27001-Trace-ID',
+      value: trace_id
+    },
+    // A.8.2.1 - Information classification: Security classification level
+    {
+      name: 'X-ISO27001-Classification',
+      value: classification.toUpperCase()
+    },
+    // A.9.4.1 - Information access restriction: Security validation status
+    {
+      name: 'X-ISO27001-Access-Control',
+      value: 'ABAC-Validated'
+    },
+    // A.13.2.1 - Information transfer: Compliance framework
+    {
+      name: 'X-ISO27001-Compliance',
+      value: 'GDPR-ISO27001'
+    }
+  ];
+
+  // Add GDPR status if token present (A.13.2.1)
+  if (gdpr_token) {
+    headers.push({
+      name: 'X-ISO27001-GDPR-Status',
+      value: 'Double-Validated'
+    });
+  } else {
+    // If no GDPR token, add timestamp for audit trail (A.12.4.1)
+    headers.push({
+      name: 'X-ISO27001-Timestamp',
+      value: new Date().toISOString()
+    });
+  }
+
+  // Add digital signature info if we have signed PDFs and room for one more header (A.13.2.3)
+  const signedPdfs = attachments?.filter(a => a.name.endsWith('_signed.pdf')) || [];
+  if (signedPdfs.length > 0 && headers.length < 5) {
+    // Remove last header to make room for signature info if needed
+    if (headers.length === 5) headers.pop();
+    headers.push({
+      name: 'X-ISO27001-Digital-Signature',
+      value: `Applied-${signedPdfs.length}-PDFs`
+    });
+  }
+
+  logger.info('Built ISO 27001 compliant security headers', {
+    trace_id,
+    header_count: headers.length,
+    classification,
+    has_gdpr_token: !!gdpr_token,
+    has_signed_pdfs: signedPdfs.length > 0,
+    iso_controls: ['A.8.2.1', 'A.12.4.1', 'A.13.2.1']
+  });
+
+  return headers;
+}
+
+/**
+ * Processes email attachments for Microsoft Graph API
+ * 
+ * Reads each attachment file, converts to base64, and formats
+ * according to Microsoft Graph fileAttachment specification.
+ * 
+ * @param attachments - Array of attachment file information
+ * @param trace_id - Trace ID for logging
+ * @returns Array of Microsoft Graph attachment objects
+ * @throws Error if any attachment file cannot be read
+ */
+async function processAttachments(
+  attachments: EmailAttachment[],
+  trace_id: string
+): Promise<any[]> {
+  
+  logger.info('Processing email attachments with security validation', {
+    trace_id,
+    attachment_count: attachments.length
+  });
+
+  const processedAttachments = [];
+
+  for (const attachment of attachments) {
+    try {
+      // Validate attachment file exists and is readable
+      await validateAttachmentFile(attachment, trace_id);
+
+      // Read file and convert to base64
+      const contentBytes = await fs.readFile(attachment.path);
+      const base64Content = contentBytes.toString('base64');
+
+      logger.info('Attachment processed successfully', {
+        trace_id,
+        name: attachment.name,
+        path: attachment.path,
+        size_bytes: contentBytes.length,
+        base64_length: base64Content.length,
+        is_signed_pdf: attachment.name.endsWith('_signed.pdf')
+      });
+
+      // Format for Microsoft Graph API
+      processedAttachments.push({
+        '@odata.type': '#microsoft.graph.fileAttachment',
+        name: attachment.name,
+        contentBytes: base64Content,
+        contentType: getContentType(attachment.name),
+        // Add custom properties for signed PDFs
+        ...(attachment.name.endsWith('_signed.pdf') && {
+          isInline: false,
+          size: contentBytes.length
+        })
+      });
+
+    } catch (error) {
+      logger.error('Failed to process attachment', {
+        trace_id,
+        name: attachment.name,
+        path: attachment.path,
+        error: (error as Error).message
+      });
+
+      throw new Error(`Failed to process attachment ${attachment.name}: ${(error as Error).message}`);
+    }
+  }
+
+  return processedAttachments;
+}
+
+/**
+ * Validates that an attachment file exists and is readable
+ * 
+ * @param attachment - Attachment to validate
+ * @param trace_id - Trace ID for logging
+ * @throws Error if file is not accessible
+ */
+async function validateAttachmentFile(
+  attachment: EmailAttachment,
+  trace_id: string
+): Promise<void> {
+  
+  try {
+    const stats = await fs.stat(attachment.path);
+    
+    if (!stats.isFile()) {
+      throw new Error(`Attachment path is not a file: ${attachment.path}`);
+    }
+
+    // Additional security validation for signed PDFs
+    if (attachment.name.endsWith('_signed.pdf')) {
+      logger.info('Validating signed PDF attachment', {
+        trace_id,
+        name: attachment.name,
+        path: attachment.path,
+        size_bytes: stats.size
+      });
+    }
+
+    logger.info('Attachment file validated', {
+      trace_id,
+      name: attachment.name,
+      path: attachment.path,
+      size_bytes: stats.size
+    });
+
+  } catch (error) {
+    logger.error('Attachment file validation failed', {
+      trace_id,
+      name: attachment.name,
+      path: attachment.path,
+      error: (error as Error).message
+    });
+
+    throw new Error(`Attachment file not accessible: ${attachment.path}`);
+  }
+}
+
+/**
+ * Determines content type based on file extension
+ * 
+ * @param filename - Name of the file
+ * @returns MIME type string
+ */
+function getContentType(filename: string): string {
+  const extension = path.extname(filename).toLowerCase();
+  
+  switch (extension) {
+    case '.pdf':
+      return 'application/pdf';
+    case '.txt':
+      return 'text/plain';
+    case '.json':
+      return 'application/json';
+    case '.xml':
+      return 'application/xml';
+    case '.csv':
+      return 'text/csv';
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg';
+    case '.png':
+      return 'image/png';
+    case '.docx':
+      return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    case '.xlsx':
+      return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    default:
+      return 'application/octet-stream';
+  }
+}
+// services/email/emailServiceHelpers.ts
+// src/services/email/emailServiceHelpers.ts
+
+import { sendEmail, EmailParams } from './emailService';
+import { getServiceContainer } from '../serviceContainer';
+
+/**
+ * Send email using the initialized service container
+ * Clean helper that automatically uses the correct config
+ */
+export async function sendEmailWithConfig(
+  emailParams: EmailParams,
+  trace_id: string
+): Promise<number> {
+  const container = getServiceContainer();
+  const emailConfig = container.getEmailConfig();
+  
+  return sendEmail(emailParams, trace_id, emailConfig);
+}
+
+/**
+ * Export for easy importing
+ */
+export { EmailParams, EmailAttachment } from './emailService';
+// services/email/internalRoutes.ts
+import express from 'express';
+import { sendEmailWithConfig } from './emailServiceHelpers';
+import { createAuthenticateJWT, authorizeAdmin } from '../../middlewares';
+import { getServiceContainer } from '../serviceContainer';
+import { v4 as uuidv4 } from 'uuid';
+
+const router = express.Router();
+
+router.post(
+  '/send-internal',
+  // Dynamic middleware - creates JWT authenticator with loaded config
+  (req, res, next) => {
+    try {
+      const container = getServiceContainer();
+      const jwtSecret = container.getJwtSecret();
+      const authenticateJWT = createAuthenticateJWT(jwtSecret);
+      authenticateJWT(req, res, next);
+    } catch (error) {
+      res.status(500).json({ 
+        error: 'Service not properly initialized',
+        details: (error as Error).message 
+      });
+    }
+  },
+  authorizeAdmin,
+  async (req, res) => {
+    const trace_id = uuidv4(); // Generate a unique trace ID for this request
+    
+    try {
+      const result = await sendEmailWithConfig(req.body, trace_id);
+      res.json({ success: true, trace_id, result });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to send email', trace_id });
+    }
+  }
+);
+
+export default router;
+// services/email/pdfSigningService.ts
+// src/services/pdfSigningService.ts
+
+import { signPDF } from '../../utils/pdfSigner';
+import logger from '../../utils/logging';
+import { getServiceContainer } from '../serviceContainer';
+import { EmailAttachment } from '../email/emailService';
+import { PdfSigningConfig } from '../../types/pdfTypes';
+
+/**
+ * PDF Signing Service
+ * 
+ * Single responsibility: Sign PDF files and return updated attachment paths.
+ * This service doesn't know about emails, GDPR, or anything else.
+ * It just signs PDFs and tells you where the signed versions are.
+ */
+
+export interface SigningResult {
+  originalAttachment: EmailAttachment;
+  signedAttachment: EmailAttachment;
+  wasSigned: boolean;
+  reason: string;
+}
+
+/**
+ * Signs all PDF attachments in the provided list
+ * 
+ * For each attachment:
+ * - If it's not a PDF: returns original unchanged
+ * - If it's already signed: returns original unchanged  
+ * - If it's a PDF that needs signing: signs it and returns new path
+ * 
+ * @param attachments - Array of original attachments
+ * @param trace_id - Trace ID for logging context
+ * @returns Array of signing results with original and signed attachment info
+ */
+export async function signPDFAttachments(
+  attachments: EmailAttachment[],
+  trace_id: string
+): Promise<SigningResult[]> {
+  
+  if (!attachments || attachments.length === 0) {
+    logger.info('No attachments provided for signing', { trace_id });
+    return [];
+  }
+
+  const results: SigningResult[] = [];
+
+  for (const attachment of attachments) {
+    const result = await signSingleAttachment(attachment, trace_id);
+    results.push(result);
+  }
+
+  logger.info('PDF signing batch completed', {
+    trace_id,
+    total_attachments: attachments.length,
+    signed_count: results.filter(r => r.wasSigned).length,
+    skipped_count: results.filter(r => !r.wasSigned).length
+  });
+
+  return results;
+}
+
+/**
+ * Signs a single attachment if it's a PDF that needs signing
+ * 
+ * Business rules:
+ * - Non-PDF files: skip (return original)
+ * - Already signed PDFs: skip (return original)
+ * - Unsigned PDFs: sign and return new path
+ * 
+ * @param attachment - Single attachment to process
+ * @param trace_id - Trace ID for logging
+ * @returns Signing result with original and signed attachment info
+ */
+async function signSingleAttachment(
+  attachment: EmailAttachment,
+  trace_id: string
+): Promise<SigningResult> {
+  
+  // Skip non-PDF files
+  if (!attachment.name.toLowerCase().endsWith('.pdf')) {
+    logger.info('Skipping non-PDF attachment', {
+      trace_id,
+      name: attachment.name,
+      reason: 'Not a PDF file'
+    });
+    
+    return {
+      originalAttachment: attachment,
+      signedAttachment: attachment, // Same as original
+      wasSigned: false,
+      reason: 'Not a PDF file'
+    };
+  }
+
+  // Skip already signed PDFs
+  if (attachment.name.endsWith('_signed.pdf')) {
+    logger.info('Skipping already signed PDF', {
+      trace_id,
+      name: attachment.name,
+      reason: 'Already signed'
+    });
+    
+    return {
+      originalAttachment: attachment,
+      signedAttachment: attachment, // Same as original
+      wasSigned: false,
+      reason: 'Already signed'
+    };
+  }
+
+  // Sign the PDF
+  const signedName = attachment.name.replace(/\.pdf$/i, '_signed.pdf');
+  const signedPath = attachment.path.replace(/\.pdf$/i, '_signed.pdf');
+
+  logger.info('Signing PDF attachment', {
+    trace_id,
+    original_name: attachment.name,
+    original_path: attachment.path,
+    signed_name: signedName,
+    signed_path: signedPath
+  });
+
+  try {
+    // Get PDF signing config from service container
+    const container = getServiceContainer();
+    const pdfConfig = container.getPdfSigningConfig();
+
+    await signPDF({
+      pdfPath: attachment.path,
+      outputPath: signedPath,
+      certPath: pdfConfig.certPdfSignPath,
+      certPassword: pdfConfig.certPdfSignPassword || '',
+      type: pdfConfig.certPdfSignType
+    });
+
+    logger.info('PDF signing successful', {
+      trace_id,
+      original_name: attachment.name,
+      signed_name: signedName
+    });
+
+    return {
+      originalAttachment: attachment,
+      signedAttachment: {
+        name: signedName,
+        path: signedPath
+      },
+      wasSigned: true,
+      reason: 'Successfully signed'
+    };
+
+  } catch (error) {
+    logger.error('PDF signing failed', {
+      trace_id,
+      original_name: attachment.name,
+      error: (error as Error).message
+    });
+
+    // In case of signing failure, we could either:
+    // 1. Throw error (fail fast)
+    // 2. Return original (fallback)
+    // For security, we choose fail fast
+    throw new Error(`Failed to sign PDF ${attachment.name}: ${(error as Error).message}`);
+  }
+}
+
+/**
+ * Extracts only the signed attachments from signing results
+ * 
+ * This is a convenience function for callers who just want
+ * the final list of attachments to use for email sending.
+ * 
+ * @param signingResults - Results from signPDFAttachments()
+ * @returns Array of attachments ready for email sending
+ */
+export function getSignedAttachments(signingResults: SigningResult[]): EmailAttachment[] {
+  return signingResults.map(result => result.signedAttachment);
+}
+
+/**
+ * Validates that all expected PDFs were successfully signed
+ * 
+ * Use this to ensure no unsigned PDFs slip through the process.
+ * Throws error if any PDF that should have been signed wasn't.
+ * 
+ * @param signingResults - Results from signPDFAttachments()
+ * @param trace_id - Trace ID for logging
+ * @throws Error if validation fails
+ */
+export function validateSigningResults(
+  signingResults: SigningResult[],
+  trace_id: string
+): void {
+  
+  const pdfFiles = signingResults.filter(r => 
+    r.originalAttachment.name.toLowerCase().endsWith('.pdf')
+  );
+  
+  const unsignedPdfs = pdfFiles.filter(r => 
+    !r.wasSigned && !r.originalAttachment.name.endsWith('_signed.pdf')
+  );
+
+  if (unsignedPdfs.length > 0) {
+    const unsignedNames = unsignedPdfs.map(r => r.originalAttachment.name);
+    
+    logger.error('Validation failed: unsigned PDFs detected', {
+      trace_id,
+      unsigned_pdfs: unsignedNames
+    });
+    
+    throw new Error(`Unsigned PDFs detected: ${unsignedNames.join(', ')}`);
+  }
+
+  logger.info('PDF signing validation passed', {
+    trace_id,
+    total_pdfs: pdfFiles.length,
+    all_signed: true
+  });
+}
+// services/email/publicRoutes.ts
+// src/services/email/publicRoutes.ts
+import express from 'express';
+import { abacSend } from '../../controllers/email/abacSend';
+import { getServiceContainer } from '../serviceContainer';
+import { v4 as uuidv4 } from 'uuid';
+import logger from '../../utils/logging';
+import { sendEmail } from './emailService';
+
+const router = express.Router();
+
+// No requiere JWT, solo gdpr_token
+router.post('/send-with-consent', abacSend);
+
+router.post('/send-internal', async (req, res) => {
+    const trace_id = uuidv4();
+   
+    try {
+      logger.info('Internal email request received - BYPASS MODE', {
+        trace_id,
+        to: req.body.to,
+        from: req.body.from || 'config_default',
+        subject: req.body.subject?.substring(0, 50),
+        from_oracle: true,
+        endpoint: 'send-internal',
+        bypass_pep: true
+      });
+
+      // Llamar directamente a sendEmail SIN PEP
+      const container = getServiceContainer();
+      const emailConfig = container.getEmailConfig();
+      
+      const result = await sendEmail(req.body, trace_id, emailConfig);
+     
+      logger.info('Internal email sent successfully - BYPASS MODE', {
+        trace_id,
+        result,
+        to: req.body.to,
+        from: req.body.from || 'config_default',
+        bypass_pep: true
+      });
+ 
+      res.json({
+        success: true,
+        trace_id,
+        result,
+        message: 'Email sent successfully from internal endpoint (bypass mode)'
+      });
+     
+    } catch (err: any) {
+      // 🔥 MEJORAR ERRORES COMO EN EL ENDPOINT GDPR
+      const error = err as any;
+      
+      logger.error('Internal email failed', {
+        trace_id,
+        error: error.message,
+        to: req.body.to,
+        from: req.body.from || 'config_default',
+        bypass_mode: true,
+        has_error_details: !!error.details,
+        has_user_action: !!error.userAction
+      });
+
+      // Si el error viene del emailService mejorado, usar esos detalles
+      if (error.details && error.userAction) {
+        return res.status(error.statusCode === 403 ? 403 : 500).json({
+          success: false,
+          trace_id,
+          error: error.message,
+          details: error.details,
+          user_action: error.userAction,
+          ...(error.graphErrorCode && { graph_error_code: error.graphErrorCode }),
+          endpoint: 'send-internal',
+          timestamp: new Date().toISOString()
+        });
+      } else {
+        // Error genérico
+        return res.status(500).json({
+          success: false,
+          trace_id,
+          error: error.message || 'Unknown error',
+          details: 'An unexpected error occurred in internal email endpoint',
+          user_action: 'Check the email parameters and try again',
+          endpoint: 'send-internal',
+          timestamp: new Date().toISOString()
+        });
+      }
+    }
+}); 
+
+export default router;
+// services/email/tokenService.ts
+import axios from 'axios';
+import qs from 'querystring';
+
+export interface TokenServiceConfig {
+  tokenEndpoint: string;
+  tenantId: string;
+  clientId: string;
+  clientSecret: string;
+}
+
+let cachedToken: {
+  value: string;
+  expiresAt: number;
+} | null = null;
+
+export async function getAccessToken(config: TokenServiceConfig): Promise<string> {
+  const now = Date.now();
+  
+  // Return cached token if still valid
+  if (cachedToken && cachedToken.expiresAt > now + 60_000) {
+    return cachedToken.value;
+  }
+
+  const url = `${config.tokenEndpoint}/${config.tenantId}/oauth2/v2.0/token`;
+  const data = qs.stringify({
+    client_id: config.clientId,
+    client_secret: config.clientSecret,
+    scope: 'https://graph.microsoft.com/.default',
+    grant_type: 'client_credentials'
+  });
+
+  const headers = {
+    'Content-Type': 'application/x-www-form-urlencoded'
+  };
+
+  const response = await axios.post(url, data, { headers });
+  const { access_token, expires_in } = response.data;
+
+  // Cache token with expiration time
+  cachedToken = {
+    value: access_token,
+    expiresAt: now + expires_in * 1000
+  };
+
+  console.log('[core-services] OAuth token acquired from Microsoft Graph');
+  return access_token;
+}
+// services/gdpr/gdprTokenService.ts
+// services/gdpr/gdprTokenService.ts
+
+import crypto from 'crypto';
+import logger from '../../utils/logging';
+import { v4 as uuidv4 } from 'uuid';
+
+/**
+ * GDPR Token Service - Production Implementation
+ * 
+ * Generates and validates GDPR consent tokens with payload hash validation
+ * Implements Zero Trust principles for email consent verification
+ */
+
+export interface GDPRConsentRecord {
+  token: string;
+  original_hash: string;
+  signed_hash?: string;  // Generated after PDF signing
+  subject: string;
+  purpose: string;
+  created_at: string;
+  expires_at: string;
+  user_id?: string;
+  client_id?: string;
+}
+
+export interface GDPRTokenRequest {
+  recipient_email: string;
+  purpose: string;
+  payload_hash: string;
+  expires_in_hours?: number;
+  user_id?: string;
+  client_id?: string;
+}
+
+export interface GDPRValidationRequest {
+  token: string;
+  payload_hash: string;
+  recipient_email: string;
+  purpose?: string;
+}
+
+export interface GDPRValidationResult {
+  valid: boolean;
+  reason: string;
+  consent_record?: GDPRConsentRecord;
+  hash_type?: 'original' | 'signed';
+}
+
+/**
+ * In-memory consent store (production should use database)
+ * This is a simple implementation for immediate use
+ */
+class ConsentStore {
+  private consents = new Map<string, GDPRConsentRecord>();
+  
+  save(record: GDPRConsentRecord): void {
+    this.consents.set(record.token, record);
+    
+    logger.system('GDPR consent record saved', {
+      token_preview: record.token.substring(0, 8) + '...',
+      subject: record.subject,
+      purpose: record.purpose,
+      expires_at: record.expires_at,
+      has_signed_hash: !!record.signed_hash
+    });
+  }
+  
+  get(token: string): GDPRConsentRecord | undefined {
+    return this.consents.get(token);
+  }
+  
+  updateSignedHash(token: string, signed_hash: string): boolean {
+    const record = this.consents.get(token);
+    if (record) {
+      record.signed_hash = signed_hash;
+      this.consents.set(token, record);
+      
+      logger.system('GDPR consent signed hash updated', {
+        token_preview: token.substring(0, 8) + '...',
+        signed_hash: signed_hash.substring(0, 16) + '...'
+      });
+      
+      return true;
+    }
+    return false;
+  }
+  
+  cleanup(): void {
+    const now = new Date();
+    const expired: string[] = [];
+    
+    this.consents.forEach((record, token) => {
+      if (new Date(record.expires_at) < now) {
+        expired.push(token);
+      }
+    });
+    
+    expired.forEach(token => this.consents.delete(token));
+    
+    if (expired.length > 0) {
+      logger.system('GDPR consent cleanup completed', {
+        expired_tokens: expired.length,
+        remaining_tokens: this.consents.size
+      });
+    }
+  }
+  
+  getStats(): { total: number; active: number; expired: number } {
+    const now = new Date();
+    let active = 0;
+    let expired = 0;
+    
+    this.consents.forEach(record => {
+      if (new Date(record.expires_at) < now) {
+        expired++;
+      } else {
+        active++;
+      }
+    });
+    
+    return { total: this.consents.size, active, expired };
+  }
+}
+
+/**
+ * GDPR Token Service Implementation
+ */
+export class GDPRTokenService {
+  private consentStore: ConsentStore;
+  private cleanupInterval: NodeJS.Timeout | null = null;
+  
+  constructor() {
+    this.consentStore = new ConsentStore();
+    this.startCleanupTimer();
+  }
+  
+  /**
+   * Generate a new GDPR consent token
+   * 
+   * @param request - Token generation request
+   * @returns Generated consent record with token
+   */
+  generateToken(request: GDPRTokenRequest): GDPRConsentRecord {
+    const trace_id = uuidv4();
+    
+    logger.system('Generating GDPR consent token', {
+      trace_id,
+      recipient: request.recipient_email,
+      purpose: request.purpose,
+      payload_hash: request.payload_hash.substring(0, 16) + '...',
+      expires_in_hours: request.expires_in_hours || 24
+    });
+    
+    // Generate unique token
+    const token = this.createUniqueToken();
+    
+    // Calculate expiration
+    const expiresAt = new Date();
+    expiresAt.setHours(expiresAt.getHours() + (request.expires_in_hours || 24));
+    
+    // Create consent record
+    const record: GDPRConsentRecord = {
+      token,
+      original_hash: request.payload_hash,
+      subject: request.recipient_email,
+      purpose: request.purpose,
+      created_at: new Date().toISOString(),
+      expires_at: expiresAt.toISOString(),
+      user_id: request.user_id,
+      client_id: request.client_id
+    };
+    
+    // Store the consent
+    this.consentStore.save(record);
+    
+    logger.system('GDPR consent token generated successfully', {
+      trace_id,
+      token_preview: token.substring(0, 8) + '...',
+      expires_at: record.expires_at,
+      recipient: request.recipient_email
+    });
+    
+    return record;
+  }
+  
+  /**
+   * Validate GDPR consent token and payload
+   * 
+   * @param request - Validation request
+   * @returns Validation result
+   */
+  validateToken(request: GDPRValidationRequest): GDPRValidationResult {
+    const trace_id = uuidv4();
+    
+    logger.system('Validating GDPR consent token', {
+      trace_id,
+      token_preview: request.token.substring(0, 8) + '...',
+      payload_hash: request.payload_hash.substring(0, 16) + '...',
+      recipient: request.recipient_email
+    });
+    
+    // Clean up expired tokens first
+    this.consentStore.cleanup();
+    
+    // Get consent record
+    const record = this.consentStore.get(request.token);
+    if (!record) {
+      logger.warn('GDPR token validation failed - token not found', {
+        trace_id,
+        token_preview: request.token.substring(0, 8) + '...'
+      });
+      
+      return {
+        valid: false,
+        reason: 'Invalid or expired GDPR token - no consent record found'
+      };
+    }
+    
+    // Check expiration
+    if (new Date(record.expires_at) < new Date()) {
+      logger.warn('GDPR token validation failed - token expired', {
+        trace_id,
+        token_preview: request.token.substring(0, 8) + '...',
+        expires_at: record.expires_at
+      });
+      
+      return {
+        valid: false,
+        reason: 'GDPR consent has expired'
+      };
+    }
+    
+    // Validate payload hash (original or signed)
+    const originalMatch = record.original_hash === request.payload_hash;
+    const signedMatch = record.signed_hash === request.payload_hash;
+    
+    if (!originalMatch && !signedMatch) {
+      logger.warn('GDPR token validation failed - hash mismatch', {
+        trace_id,
+        token_preview: request.token.substring(0, 8) + '...',
+        expected_original: record.original_hash.substring(0, 16) + '...',
+        expected_signed: record.signed_hash?.substring(0, 16) + '...' || 'not_set',
+        received: request.payload_hash.substring(0, 16) + '...'
+      });
+      
+      return {
+        valid: false,
+        reason: `Payload hash does not match registered consent. Expected: ${record.original_hash} (original)${record.signed_hash ? ` or ${record.signed_hash} (signed)` : ''}, got: ${request.payload_hash}`
+      };
+    }
+    
+    // Validate subject
+    if (record.subject !== request.recipient_email) {
+      logger.warn('GDPR token validation failed - subject mismatch', {
+        trace_id,
+        token_preview: request.token.substring(0, 8) + '...',
+        expected_subject: record.subject,
+        received_subject: request.recipient_email
+      });
+      
+      return {
+        valid: false,
+        reason: `Subject mismatch. Expected: ${record.subject}, got: ${request.recipient_email}`
+      };
+    }
+    
+    // Validate purpose if provided
+    if (request.purpose && record.purpose !== request.purpose) {
+      logger.warn('GDPR token validation failed - purpose mismatch', {
+        trace_id,
+        token_preview: request.token.substring(0, 8) + '...',
+        expected_purpose: record.purpose,
+        received_purpose: request.purpose
+      });
+      
+      return {
+        valid: false,
+        reason: `Purpose mismatch. Expected: ${record.purpose}, got: ${request.purpose}`
+      };
+    }
+    
+    const hashType = originalMatch ? 'original' : 'signed';
+    
+    logger.system('GDPR token validation successful', {
+      trace_id,
+      token_preview: request.token.substring(0, 8) + '...',
+      hashType,
+      subject: record.subject,
+      purpose: record.purpose
+    });
+    
+    return {
+      valid: true,
+      reason: `Consent valid and policy conditions met (${hashType} payload hash)`,
+      consent_record: record,
+      hash_type: hashType
+    };
+  }
+  
+  /**
+   * Update signed hash for existing consent (after PDF signing)
+   * 
+   * @param token - Consent token
+   * @param signed_hash - Hash of payload with signed PDFs
+   * @returns Success status
+   */
+  updateSignedHash(token: string, signed_hash: string): boolean {
+    return this.consentStore.updateSignedHash(token, signed_hash);
+  }
+  
+  /**
+   * Create unique token with proper entropy
+   */
+  private createUniqueToken(): string {
+    const timestamp = Date.now().toString(36);
+    const randomBytes = crypto.randomBytes(16).toString('hex');
+    return `gdpr_${timestamp}_${randomBytes}`;
+  }
+  
+  /**
+   * Start automatic cleanup of expired tokens
+   */
+  private startCleanupTimer(): void {
+    // Clean up every hour
+    this.cleanupInterval = setInterval(() => {
+      this.consentStore.cleanup();
+    }, 60 * 60 * 1000);
+  }
+  
+  /**
+   * Stop cleanup timer
+   */
+  stopCleanupTimer(): void {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
+    }
+  }
+  
+  /**
+   * Get service statistics
+   */
+  getStats(): { total: number; active: number; expired: number } {
+    return this.consentStore.getStats();
+  }
+}
+
+// Singleton instance
+let gdprService: GDPRTokenService | null = null;
+
+/**
+ * Get GDPR service instance
+ */
+export function getGDPRService(): GDPRTokenService {
+  if (!gdprService) {
+    gdprService = new GDPRTokenService();
+  }
+  return gdprService;
+}
+
+/**
+ * Initialize GDPR service (called from app startup)
+ */
+export function initGDPRService(): GDPRTokenService {
+  if (gdprService) {
+    gdprService.stopCleanupTimer();
+  }
+  gdprService = new GDPRTokenService();
+  
+  logger.system('GDPR token service initialized', {
+    cleanup_interval: '1 hour',
+    default_token_expiry: '24 hours'
+  });
+  return gdprService;
+} 
+// services/logEmitter.ts
+import axios from "axios";
+import { getServiceContainer } from "./serviceContainer";
+import { getAuthToken } from "../utils/getToken";
+import logger from "../utils/logging";
+
+export interface LogPayload {
+  level: "INFO" | "ERROR" | "WARN" | "DEBUG" | "TRACE" | "FATAL" | "CRITICAL" | "ALERT" | "EMERGENCY" | "NOTICE" | "AUDIT";
+  message: string;
+  service: string; // name of the service emitting the log
+  metadata?: Record<string, any>;
+  trace_id?: string; // optional trace ID for distributed tracing
+}
+
+/**
+ * Send log to centralized logging system
+ * 
+ * Note: This is a legacy function that was used before implementing
+ * the nuclear logger system. It's maintained for backward compatibility
+ * but should be phased out in favor of the structured logger.
+ * 
+ * @param log - Log payload to send
+ * @deprecated Use the nuclear logger system instead: import logger from '../utils/logging'
+ */
+export async function sendLog(log: LogPayload): Promise<void> {
+  const startTime = Date.now();
+  
+  try {
+    logger.debug('Legacy log emitter called', {
+      operation: 'SYSTEM',
+      service: log.service,
+      level: log.level,
+      message_preview: log.message.substring(0, 50),
+      has_metadata: !!log.metadata,
+      has_trace_id: !!log.trace_id,
+      deprecated_warning: 'Consider migrating to nuclear logger system'
+    });
+
+    if (!log.service) {
+      logger.warn('Legacy log emitter missing service field', {
+        operation: 'SYSTEM',
+        error_code: 'MISSING_SERVICE_FIELD',
+        log_level: log.level,
+        duration_ms: Date.now() - startTime
+      });
+      throw new Error("Missing 'service' in log payload");
+    }
+
+    // Check if we have the required configuration
+    const container = getServiceContainer();
+    const tokenConfig = container.getTokenConfig();
+    
+    // TODO: This function needs proper API URL configuration
+    // For now, we'll log the attempt but not actually send
+    const payload = {
+      client_id: tokenConfig.tenantId,
+      timestamp: new Date().toISOString(),
+      ...log,
+    };
+
+    logger.debug('Legacy log emitter payload prepared', {
+      operation: 'SYSTEM',
+      client_id: tokenConfig.tenantId,
+      service: log.service,
+      level: log.level,
+      payload_size: JSON.stringify(payload).length,
+      duration_ms: Date.now() - startTime,
+      status: 'DISABLED_NO_API_URL',
+      note: 'Central logging endpoint not configured'
+    });
+
+    // REMOVED: Ugly console.log statements
+    // These were polluting the logs with debugging info
+    
+    // TODO: Implement actual sending when API URL is configured
+    // const token = await getAuthToken();
+    // await axios.post(`${apiUrl}/emit-log`, payload, {
+    //   headers: {
+    //     Authorization: `Bearer ${token}`,
+    //   },
+    // });
+    
+    logger.debug('Legacy log emitter completed', {
+      operation: 'SYSTEM',
+      service: log.service,
+      duration_ms: Date.now() - startTime,
+      status: 'SIMULATED_SUCCESS',
+      recommendation: 'Migrate to logger.pdf(), logger.email(), logger.zpl() methods'
+    });
+
+  } catch (err: any) {
+    logger.error('Legacy log emitter failed', {
+      operation: 'SYSTEM',
+      error_code: 'LOG_EMIT_ERROR',
+      error_message: err.message,
+      service: log?.service || 'UNKNOWN',
+      duration_ms: Date.now() - startTime,
+      stack: err.stack
+    });
+  }
+}
+
+/**
+ * Migration helper: Convert legacy log to nuclear logger call
+ * 
+ * This function helps migrate from legacy sendLog() calls to the new logger system
+ * Usage: migrateLegacyLog({ service: 'pdf', level: 'INFO', message: 'PDF generated' })
+ * 
+ * @param log - Legacy log payload
+ */
+export function migrateLegacyLog(log: LogPayload): void {
+  const meta = {
+    trace_id: log.trace_id,
+    legacy_service: log.service,
+    legacy_level: log.level,
+    ...(log.metadata || {})
+  };
+
+  switch (log.service.toLowerCase()) {
+    case 'pdf':
+      if (log.level === 'ERROR') {
+        logger.pdf(`Legacy: ${log.message}`, meta);
+      } else {
+        logger.pdf(`Legacy: ${log.message}`, meta);
+      }
+      break;
+      
+    case 'zpl':
+      if (log.level === 'ERROR') {
+        logger.zpl(`Legacy: ${log.message}`, meta);
+      } else {
+        logger.zpl(`Legacy: ${log.message}`, meta);
+      }
+      break;
+      
+    case 'email':
+      if (log.level === 'ERROR') {
+        logger.email(`Legacy: ${log.message}`, meta);
+      } else {
+        logger.email(`Legacy: ${log.message}`, meta);
+      }
+      break;
+      
+    default:
+      if (log.level === 'ERROR') {
+        logger.error(`Legacy ${log.service}: ${log.message}`, meta);
+      } else {
+        logger.info(`Legacy ${log.service}: ${log.message}`, meta);
+      }
+  }
+}
+
+/**
+ * Check if central logging endpoint is configured
+ * 
+ * @returns true if ready to send to central logging system
+ */
+export function isCentralLoggingAvailable(): boolean {
+  // TODO: Implement when API URL configuration is added to ServiceContainer
+  return false;
+}
+
+/**
+ * Get the configured central logging endpoint URL
+ * 
+ * @returns URL string or null if not configured
+ */
+export function getCentralLoggingUrl(): string | null {
+  // TODO: Implement when API URL configuration is added to ServiceContainer
+  return null;
+}
+// services/pdf/generate.ts
+import path from "path";
+import { promises as fs } from "fs";
+import { compileFile } from "pug";
+import { config } from "../../config/config";
+import { acquirePage, releasePage } from "../../config/browserPool";
+import { sendLog } from "../../services/logEmitter";
+import { v4 as uuidv4 } from "uuid";
+import logger from "../../utils/logging";
+
+interface CoreReportInfo {
+  report_name: string;
+  report_description: string;
+  report_template: string;
+  report_version: string;
+  report_file_name: string;
+  report_out_mode: string;
+}
+
+export async function generatePDF(data: any): Promise<Buffer> {
+  const startTime = Date.now();
+  const info: CoreReportInfo = data.core_report_info;
+  const trace_id = uuidv4(); // Generate a unique trace ID for this request
+  
+  logger.pdf('Starting PDF generation', {
+    trace_id,
+    correlation_id: trace_id,
+    client_name: data.client_name,
+    report_name: info?.report_name,
+    report_template: info?.report_template,
+    report_file_name: info?.report_file_name
+  });
+
+  if (!info || !info.report_template) {
+    logger.pdf('PDF generation failed - missing template info', {
+      trace_id,
+      duration_ms: Date.now() - startTime,
+      error_code: 'MISSING_TEMPLATE_INFO',
+      has_core_report_info: !!info,
+      has_report_template: !!info?.report_template
+    });
+    throw new Error("Missing core_report_info or report_template");
+  }
+
+  const templatePath = path.join(
+    config.pdf.templatePath,
+    `${info.report_template}.pug`
+  );
+  const cssPath = path.join(config.pdf.cssPath, `${info.report_template}.css`);
+
+  let page: any = null;
+  
+  try {
+    logger.pdf('Loading template and CSS', {
+      trace_id,
+      template_path: templatePath,
+      css_path: cssPath
+    });
+
+    const cssContent = await fs.readFile(cssPath, "utf-8");
+    const compile = compileFile(templatePath);
+    const html = compile({
+      ...data,
+      embeddedCSS: `<style>${cssContent}</style>`,
+    });
+
+    logger.pdf('Template compiled, acquiring browser page', {
+      trace_id,
+      html_length: html.length,
+      duration_ms: Date.now() - startTime
+    });
+
+    page = await acquirePage();
+    
+    logger.pdf('Browser page acquired, rendering PDF', {
+      trace_id,
+      duration_ms: Date.now() - startTime
+    });
+
+    await page.setContent(html, { waitUntil: "domcontentloaded" });
+    
+    const pdfGenerationStart = Date.now();
+    const pdfBuffer = await page.pdf({
+      format: "A4",
+      printBackground: true,
+    });
+    const pdfGenerationTime = Date.now() - pdfGenerationStart;
+    
+    // Calculate metrics
+    const totalDuration = Date.now() - startTime;
+    const pdfSizeKB = Math.round(pdfBuffer.length / 1024);
+    
+    logger.pdf('PDF generated successfully', {
+      trace_id,
+      duration_ms: totalDuration,
+      pdf_generation_ms: pdfGenerationTime,
+      file_size_bytes: pdfBuffer.length,
+      file_size_kb: pdfSizeKB,
+      report_name: info.report_name,
+      report_file_name: info.report_file_name,
+      template: info.report_template
+    });
+
+    // Legacy log for backward compatibility (if needed)
+    console.log(
+      `[core-services] PDF generated successfully: ${info.report_file_name} (${pdfSizeKB}KB in ${totalDuration}ms)`
+    );
+    
+    await sendLog({
+      service: "pdf",
+      level: "INFO",
+      message: "PDF generated successfully",
+      trace_id,
+    });
+
+    return pdfBuffer;
+    
+  } catch (error) {
+    const errorDuration = Date.now() - startTime;
+    const errorMessage = (error as Error).message;
+    
+    logger.pdf('PDF generation failed', {
+      trace_id,
+      duration_ms: errorDuration,
+      error_code: 'PDF_GENERATION_ERROR',
+      error_message: errorMessage,
+      stack: (error as Error).stack,
+      template: info?.report_template,
+      report_name: info?.report_name
+    });
+
+    // Legacy log for backward compatibility
+    await sendLog({
+      service: "pdf",
+      level: "ERROR",
+      message: `Failed to generate PDF: ${errorMessage}`,
+      trace_id,
+    });
+    
+    throw error;
+  } finally {
+    if (page) {
+      try {
+        releasePage(page);
+        logger.pdf('Browser page released', {
+          trace_id,
+          duration_ms: Date.now() - startTime
+        });
+      } catch (releaseError) {
+        logger.pdf('Failed to release browser page', {
+          trace_id,
+          error_message: (releaseError as Error).message,
+          duration_ms: Date.now() - startTime
+        });
+      }
+    }
+  }
+}
+// services/pdf/routes.ts
+import express from 'express';
+import { generatePDF } from './generate';
+import { pdfRequestSchema } from '../../validators/pdfRequestSchema';
+import { validateBody } from '../../middlewares/validateBody';
+
+const router = express.Router();
+
+/**
+ * POST /pdf
+ * Accepts JSON with core_report_info and other dynamic data.
+ * Returns a generated PDF document as binary.
+ */
+router.post('/', validateBody(pdfRequestSchema), async (req, res, next) => {
+  try {
+    const data = req.body;
+    const info = data.core_report_info;
+
+    const buffer = await generatePDF(data);
+    const filename = info.report_file_name || 'report.pdf';
+
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename=${filename}`,
+      'Content-Length': buffer.length
+    });
+
+    return res.end(buffer);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+export default router;
+
+// services/pdp-production.ts
+// services/pdp-production.ts
+
+import { getGDPRService, GDPRValidationRequest } from './gdpr/gdprTokenService';
+import logger from '../utils/logging';
+
+/**
+ * Production PDP (Policy Decision Point) service
+ * Replaces the mock implementation with real GDPR token validation
+ */
+
+export type PDPAttributes = {
+  gdpr_token: string;
+  payload_hash: string;
+  purpose?: string;
+  subject?: string;
+  user_id?: string;
+};
+
+export type PDPDecision = {
+  allow: boolean;
+  reason: string;
+  hash_type?: 'original' | 'signed' | 'bypassed';
+};
+
+/**
+ * Evaluates GDPR consent policy using the production GDPR service
+ * 
+ * ⚠️ TEMPORARILY DISABLED FOR PHASE 1 - ALWAYS RETURNS TRUE
+ * TODO: Re-enable for Phase 2 after hash algorithm is fixed
+ * 
+ * @param attributes - Policy attributes to validate
+ * @returns Policy decision with detailed reasoning
+ */
+export const evaluatePolicy = (attributes: PDPAttributes): PDPDecision => {
+  logger.system('GDPR policy evaluation (BYPASS MODE)', {
+    token_preview: attributes.gdpr_token?.substring(0, 8) + '...',
+    payload_hash: attributes.payload_hash?.substring(0, 16) + '...',
+    subject: attributes.subject,
+    purpose: attributes.purpose,
+    bypass_mode: true,
+    phase: 'PHASE_1_DEVELOPMENT'
+  });
+  
+  // ⚠️ PHASE 1: BYPASS ALL VALIDATION - ALWAYS ALLOW
+  logger.warn('GDPR validation bypassed for Phase 1 development', {
+    token_preview: attributes.gdpr_token?.substring(0, 8) + '...',
+    bypass_reason: 'Hash algorithm inconsistency - to be fixed in Phase 2',
+    security_impact: 'REDUCED - This is temporary for development'
+  });
+  
+  return {
+    allow: true,
+    reason: 'PHASE 1: GDPR validation bypassed - hash algorithm fix pending for Phase 2',
+    hash_type: 'bypassed'
+  };
+  
+  /* 
+  // 🔒 PHASE 2: RESTORE THIS CODE WHEN HASH IS FIXED
+  const gdprService = getGDPRService();
+  
+  // Validate required fields
+  if (!attributes.gdpr_token) {
+    return {
+      allow: false,
+      reason: 'Missing GDPR token'
+    };
+  }
+  
+  if (!attributes.payload_hash) {
+    return {
+      allow: false,
+      reason: 'Missing payload hash'
+    };
+  }
+  
+  if (!attributes.subject) {
+    return {
+      allow: false,
+      reason: 'Missing subject email'
+    };
+  }
+  
+  // Validate with GDPR service
+  const validationRequest: GDPRValidationRequest = {
+    token: attributes.gdpr_token,
+    payload_hash: attributes.payload_hash,
+    recipient_email: attributes.subject,
+    purpose: attributes.purpose
+  };
+  
+  const result = gdprService.validateToken(validationRequest);
+  
+  logger.system('GDPR policy evaluation completed', {
+    token_preview: attributes.gdpr_token.substring(0, 8) + '...',
+    validation_result: result.valid,
+    reason: result.reason,
+    hash_type: result.hash_type
+  });
+  
+  return {
+    allow: result.valid,
+    reason: result.reason,
+    hash_type: result.hash_type
+  };
+  */
+};
+// services/pdp.ts
+import crypto from 'crypto';
+
+/**
+ * PDP (Policy Decision Point) service for evaluating GDPR consent policies.
+ * This service checks if a given set of attributes meets the policy requirements.
+ */
+export type PDPAttributes = {
+  gdpr_token: string;
+  payload_hash: string;
+  purpose?: string;
+  expiration?: string; // ISO string
+  subject?: string;
+  user_id?: string;
+};
+
+// Represents the decision made by the PDP service
+// It indicates whether the request is allowed or denied, along with a reason.
+// The decision is based on the evaluation of the provided attributes against the policy.
+// The decision can be used to enforce access control or compliance with GDPR regulations.
+export type PDPDecision = {
+  allow: boolean;
+  reason: string;
+};
+
+/**
+ * Mock consent database for testing double validation flow
+ * 
+ * In production, this would be a real database with consent records.
+ * Each entry represents a GDPR consent with both original and signed payload hashes.
+ * 
+ * The system validates twice:
+ * 1. First validation: original payload hash (before PDF signing)
+ * 2. Second validation: signed payload hash (after PDF signing)
+ * 
+ * Both hashes must be pre-registered for the same consent token.
+ */
+const mockConsentDatabase = new Map<string, { 
+  original_hash: string; 
+  signed_hash: string; 
+  expiresAt: string; 
+  subject: string;
+  purpose: string;
+}>([
+  ['token-gdpr-hash08a0', {
+    // Hash of payload with original PDF path
+    original_hash: '2033748d2d308f33a1350741264822a5a2e62f2747681193f8674abd0c861720',
+    // Hash of payload with _signed.pdf path  
+    signed_hash: '7515da9f7b87ae50786c68288e1c70aebc54ac0b3a56bfeb11673ec62925ea54',
+    expiresAt: '2099-12-31T23:59:59.000Z',
+    subject: 'alejandro.prado@coretechnology.ie',
+    purpose: 'email_notification'
+  }]
+]);
+
+/**
+ * Evaluates the provided attributes against the GDPR consent policy.
+ * 
+ * This function implements Zero Trust validation by checking:
+ * 1. Valid GDPR token exists in consent database
+ * 2. Payload hash matches either original_hash OR signed_hash
+ * 3. Consent has not expired
+ * 4. Subject (email recipient) matches registered consent
+ * 5. Purpose matches registered consent purpose
+ * 
+ * @param attributes - The attributes to evaluate, including gdpr_token, payload_hash, and optional fields.
+ * @returns A PDPDecision indicating whether the request is allowed or denied, along with a reason.
+ */
+export const evaluatePolicy = (attributes: PDPAttributes): PDPDecision => {
+  
+  // Check if consent record exists for this token
+  const consent = mockConsentDatabase.get(attributes.gdpr_token);
+  if (!consent) {
+    return { 
+      allow: false, 
+      reason: 'Invalid or expired gdpr_token - no consent record found' 
+    };
+  }
+
+  // Validate payload hash matches either original or signed version
+  // This allows both first validation (original) and second validation (signed) to pass
+  const hashMatches = (
+    consent.original_hash === attributes.payload_hash || 
+    consent.signed_hash === attributes.payload_hash
+  );
+  
+  if (!hashMatches) {
+    return { 
+      allow: false, 
+      reason: `Payload hash does not match registered consent. Expected: ${consent.original_hash} (original) or ${consent.signed_hash} (signed), got: ${attributes.payload_hash}` 
+    };
+  }
+
+  // Check if consent has expired
+  if (new Date(consent.expiresAt) < new Date()) {
+    return { 
+      allow: false, 
+      reason: 'Consent has expired' 
+    };
+  }
+
+  // Validate subject (email recipient) matches
+  if (attributes.subject && consent.subject !== attributes.subject) {
+    return { 
+      allow: false, 
+      reason: `Subject mismatch. Expected: ${consent.subject}, got: ${attributes.subject}` 
+    };
+  }
+
+  // Validate purpose matches (if specified)
+  if (attributes.purpose && consent.purpose !== attributes.purpose) {
+    return { 
+      allow: false, 
+      reason: `Purpose mismatch. Expected: ${consent.purpose}, got: ${attributes.purpose}` 
+    };
+  }
+
+  // All validations passed
+  const hashType = consent.original_hash === attributes.payload_hash ? 'original' : 'signed';
+  
+  return { 
+    allow: true, 
+    reason: `Consent valid and policy conditions met (${hashType} payload hash)` 
+  };
+};
+// services/pep.ts
+// src/services/pep.ts
+//import { evaluatePolicy, PDPAttributes } from './pdp';
+import { evaluatePolicy, PDPAttributes } from './pdp-production';
+import { z } from 'zod';
+//import { createHash } from 'crypto';
+import logger from '../utils/logging';
+import { generatePayloadHash } from '../utils/hashUtils';
+
+const EmailPayloadSchema = z.object({
+  to: z.string().email(),
+  subject: z.string().min(1).max(500),
+  body: z.string().min(1),
+  attachments: z
+    .array(
+      z.object({
+        name: z.string().min(1),
+        path: z.string().min(1)
+      })
+    )
+    .optional()
+});
+
+export const enforceEmailPolicy = (
+  payload: unknown,
+  gdpr_token: string
+): { allowed: boolean; reason: string; hash?: string } => {
+  
+  // 1. Validación estricta del contenido
+  const validation = EmailPayloadSchema.safeParse(payload);
+  if (!validation.success) {
+    logger.warn('Email payload failed schema validation', {
+      operation: 'EMAIL_OPERATION',
+      reason: validation.error.message,
+      validation_errors: validation.error.errors?.length || 0
+    });
+    return {
+      allowed: false,
+      reason: 'Schema validation failed'
+    };
+  }
+
+  const validated = validation.data;
+  
+  // SECURE: Only log payload details in verbose mode
+  logger.debug('Email payload validated', {
+    operation: 'EMAIL_OPERATION',
+    recipient_domain: validated.to.split('@')[1],
+    subject_length: validated.subject.length,
+    body_length: validated.body.length,
+    attachments_count: validated.attachments?.length || 0,
+    attachment_names: validated.attachments?.map(a => a.name) || [],
+    // VERBOSE ONLY: Full payload for debugging
+    ...(logger.isVerbose() && {
+      verbose_validated_payload: validated
+    })
+  });
+
+  // 2. Ordenar y hashear el payload de forma determinista
+  const hash = generatePayloadHash(validated);
+  
+  logger.debug('Payload hash generated', {
+    operation: 'EMAIL_OPERATION',
+    hash,
+    hash_algorithm: 'SHA-256',
+    payload_keys: Object.keys(validated)
+  });
+
+  // 3. Atributos para PDP (modo estricto)
+  const attributes: PDPAttributes = {
+    gdpr_token,
+    payload_hash: hash,
+    subject: validated.to,
+    purpose: 'email_notification',
+    //expiration: undefined, // future: from consent registry
+    user_id: process.env.TENANT_CLIENT_ID
+  };
+
+  // 4. Consulta a PDP
+  const decision = evaluatePolicy(attributes);
+
+  // 5. Logging estructurado con información de decisión
+  logger.info('ABAC decision evaluated', {
+    operation: 'EMAIL_OPERATION',
+    user_id: process.env.TENANT_CLIENT_ID,
+    hash,
+    decision_allowed: decision.allow,
+    decision_reason: decision.reason,
+    gdpr_token_length: gdpr_token?.length || 0,
+    purpose: attributes.purpose,
+    // VERBOSE ONLY: Full decision details
+    ...(logger.isVerbose() && {
+      verbose_full_attributes: attributes,
+      verbose_full_decision: decision,
+      verbose_gdpr_token: gdpr_token
+    })
+  });
+
+  return {
+    allowed: decision.allow,
+    reason: decision.reason,
+    hash
+  };
+};
+
+
+// Ordena las claves de objetos recursivamente
+function sortObjectRecursively(obj: any): any {
+  if (Array.isArray(obj)) {
+    return obj.map(sortObjectRecursively);
+  } else if (obj !== null && typeof obj === 'object') {
+    return Object.keys(obj)
+      .sort()
+      .reduce((result: any, key) => {
+        result[key] = sortObjectRecursively(obj[key]);
+        return result;
+      }, {});
+  }
+  return obj;
+}
+// services/serviceContainer.ts
+// src/services/serviceContainer.ts
+import { EmailServiceConfig } from './email/emailService';
+import { TokenServiceConfig } from './email/tokenService';
+import { PdfSigningConfig } from '../types/pdfTypes';
+import { AuthConfig } from '../utils/getToken';
+import { initializeBrowserPool } from '../config/browserPool';
+
+/**
+ * Service Container for Dependency Injection
+ * Centralizes all service configurations and provides clean access
+ */
+export class ServiceContainer {
+  private emailConfig: EmailServiceConfig;
+  private jwtSecret: string;
+  private pdfSigningConfig: PdfSigningConfig;
+  private authConfig: AuthConfig;
+
+  constructor(appConfig: any) {
+    // Email service configuration
+    this.emailConfig = {
+      senderEmail: appConfig.senderEmail,
+      tokenEndpoint: appConfig.tokenEndpoint,
+      tenantId: appConfig.tenantId,
+      clientId: appConfig.clientId,
+      clientSecret: appConfig.clientSecret
+    };
+
+    // JWT configuration
+    this.jwtSecret = appConfig.jwtSecret;
+
+    // PDF signing configuration
+    this.pdfSigningConfig = {
+      certPdfSignPath: appConfig.certPdfSignPath,
+      certPdfSignPassword: appConfig.certPdfSignPassword,
+      certPdfSignType: appConfig.certPdfSignType || 'p12'
+    };
+
+    // Auth configuration
+    this.authConfig = {
+      authUrl: appConfig.authFullUrl, // Using authFullUrl from your original config
+      authUsername: appConfig.authUsername,
+      authPassword: appConfig.authPassword
+    };
+  }
+
+  /**
+   * Get Email Service Configuration
+   */
+  getEmailConfig(): EmailServiceConfig {
+    return this.emailConfig;
+  }
+
+  /**
+   * Get Token Service Configuration
+   */
+  getTokenConfig(): TokenServiceConfig {
+    return {
+      tokenEndpoint: this.emailConfig.tokenEndpoint,
+      tenantId: this.emailConfig.tenantId,
+      clientId: this.emailConfig.clientId,
+      clientSecret: this.emailConfig.clientSecret
+    };
+  }
+
+  /**
+   * Get JWT Secret
+   */
+  getJwtSecret(): string {
+    return this.jwtSecret;
+  }
+
+  /**
+   * Get PDF Signing Configuration
+   */
+  getPdfSigningConfig(): PdfSigningConfig {
+    return this.pdfSigningConfig;
+  }
+
+  /**
+   * Get Auth Configuration
+   */
+  getAuthConfig(): AuthConfig {
+    return this.authConfig;
+  }
+}
+
+// Global service container instance
+let serviceContainer: ServiceContainer | null = null;
+
+/**
+ * Initialize the service container with app configuration
+ * Should be called once during app startup
+ */
+export async function initServiceContainer(appConfig: any): Promise<ServiceContainer> {
+  serviceContainer = new ServiceContainer(appConfig);
+  
+  // Inicializar browser pool también
+  await initializeBrowserPool();
+  console.log('🌐 Browser pool initialized');
+ 
+  return serviceContainer;
+}
+
+/**
+ * Get the initialized service container
+ * Throws error if not initialized
+ */
+export function getServiceContainer(): ServiceContainer {
+  if (!serviceContainer) {
+    throw new Error('Service container not initialized. Call initServiceContainer() first.');
+  }
+  return serviceContainer;
+}
+// services/zpl/generate.ts
+import fs from 'fs';
+import path from 'path';
+import mustache from 'mustache';
+import { config } from '../../config/config';
+import { v4 as uuidv4 } from 'uuid';
+import logger from '../../utils/logging';
+
+/**
+ * Generates a ZPL string using a mustache template and dynamic data.
+ * @param data Input JSON containing `core_report_info` and custom data
+ * @returns Rendered ZPL string
+ * @throws Error if template is missing or cannot be rendered
+ */
+export const generateZPL = async (data: any): Promise<string> => {
+  const startTime = Date.now();
+  const trace_id = uuidv4();
+  const templateName = data.core_report_info?.report_template;
+  
+  logger.zpl('Starting ZPL generation', {
+    trace_id,
+    correlation_id: trace_id,
+    client_name: data.client_name,
+    template_name: templateName,
+    report_name: data.core_report_info?.report_name,
+    report_file_name: data.core_report_info?.report_file_name
+  });
+
+  if (!templateName) {
+    logger.zpl('ZPL generation failed - missing template name', {
+      trace_id,
+      duration_ms: Date.now() - startTime,
+      error_code: 'MISSING_TEMPLATE_NAME',
+      has_core_report_info: !!data.core_report_info
+    });
+    throw new Error('Missing report_template in core_report_info');
+  }
+
+  const templatePath = path.join(config.zpl.templatePath, `${templateName}.zpl`);
+  
+  logger.zpl('Checking template file', {
+    trace_id,
+    template_path: templatePath,
+    template_name: templateName,
+    duration_ms: Date.now() - startTime
+  });
+
+  if (!fs.existsSync(templatePath)) {
+    logger.zpl('ZPL generation failed - template not found', {
+      trace_id,
+      duration_ms: Date.now() - startTime,
+      error_code: 'TEMPLATE_NOT_FOUND',
+      template_path: templatePath,
+      template_name: templateName
+    });
+    throw new Error(`ZPL template not found: ${templatePath}`);
+  }
+
+  try {
+    logger.zpl('Reading template file', {
+      trace_id,
+      template_path: templatePath,
+      duration_ms: Date.now() - startTime
+    });
+
+    const zplTemplate = fs.readFileSync(templatePath, 'utf-8');
+    const templateSize = zplTemplate.length;
+    
+    logger.zpl('Template loaded, rendering with Mustache', {
+      trace_id,
+      template_size_bytes: templateSize,
+      template_size_chars: templateSize,
+      data_keys: Object.keys(data).length,
+      duration_ms: Date.now() - startTime
+    });
+
+    const renderStartTime = Date.now();
+    const zplRendered = mustache.render(zplTemplate, data);
+    const renderDuration = Date.now() - renderStartTime;
+    
+    // Calculate metrics
+    const totalDuration = Date.now() - startTime;
+    const outputSize = zplRendered.length;
+    const compressionRatio = templateSize > 0 ? (outputSize / templateSize).toFixed(2) : '0';
+    
+    // Count labels (estimate based on ^XA commands which start a label)
+    const labelCount = (zplRendered.match(/\^XA/g) || []).length;
+    
+    logger.zpl('ZPL generated successfully', {
+      trace_id,
+      duration_ms: totalDuration,
+      render_duration_ms: renderDuration,
+      template_name: templateName,
+      template_size_bytes: templateSize,
+      output_size_bytes: outputSize,
+      output_size_chars: outputSize,
+      compression_ratio: compressionRatio,
+      zpl_labels: labelCount,
+      estimated_labels: labelCount,
+      report_name: data.core_report_info?.report_name,
+      report_file_name: data.core_report_info?.report_file_name
+    });
+
+    // Legacy console log for backward compatibility
+    console.log(
+      `[core-services] ZPL generated successfully: ${templateName} (${labelCount} labels, ${outputSize} chars, ${totalDuration}ms)`
+    );
+
+    return zplRendered;
+    
+  } catch (error) {
+    const errorDuration = Date.now() - startTime;
+    const errorMessage = (error as Error).message;
+    
+    logger.zpl('ZPL generation failed during rendering', {
+      trace_id,
+      duration_ms: errorDuration,
+      error_code: 'RENDERING_ERROR',
+      error_message: errorMessage,
+      stack: (error as Error).stack,
+      template_name: templateName,
+      template_path: templatePath
+    });
+    
+    throw error;
+  }
+};
+// services/zpl/routes.ts
+import express from 'express';
+import { generateZPL } from './generate';
+import { zplRequestSchema } from '../../validators/zplRequestSchema';
+import { validateBody } from '../../middlewares/validateBody';
+
+const router = express.Router();
+
+/**
+ * POST /zpl
+ * Accepts JSON with core_report_info and other dynamic data.
+ * Returns a generated ZPL string as a plain text file.
+ */
+router.post('/', validateBody(zplRequestSchema), async (req, res, next) => {
+  try {
+    const data = req.body;
+    const zpl = await generateZPL(data);
+
+    res.set({
+      'Content-Type': 'text/plain',
+      'Content-Disposition': 'attachment; filename=etiquetas.zpl.txt',
+      'Content-Length': Buffer.byteLength(zpl),
+    });
+
+    return res.end(zpl);
+  } catch (error) {
+    return next(error);
+  }
+});
+
+export default router;
+
+// types/iso27001.ts
+// src/types/iso27001.ts
+
+/**
+ * ISO 27001 Annex A.8.2 - Information Classification Levels
+ * 
+ * These classification levels map directly to ISO 27001 security controls
+ * and determine the appropriate security measures for each email.
+ */
+export type ISO27001Classification = 'internal' | 'confidential' | 'restricted';
+
+/**
+ * ISO 27001 Security Control Mapping
+ * 
+ * - internal: A.9.4.1 (Information access restriction)
+ * - confidential: A.9.4.1 + A.13.2.1 (Information transfer)  
+ * - restricted: A.9.4.1 + A.13.2.1 + A.13.2.3 (Electronic messaging with digital signatures)
+ */
+export interface ISO27001SecurityControls {
+  accessRestriction: boolean;      // A.9.4.1
+  informationTransfer: boolean;    // A.13.2.1
+  electronicMessaging: boolean;    // A.13.2.3
+  auditLogging: boolean;          // A.12.4.1
+}
+
+/**
+ * Maps ISO classification to required security controls
+ */
+export const getSecurityControls = (classification: ISO27001Classification): ISO27001SecurityControls => {
+  switch (classification) {
+    case 'internal':
+      return {
+        accessRestriction: true,
+        informationTransfer: false,
+        electronicMessaging: false,
+        auditLogging: true
+      };
+    case 'confidential':
+      return {
+        accessRestriction: true,
+        informationTransfer: true,
+        electronicMessaging: false,
+        auditLogging: true
+      };
+    case 'restricted':
+      return {
+        accessRestriction: true,
+        informationTransfer: true,
+        electronicMessaging: true,
+        auditLogging: true
+      };
+    default:
+      throw new Error(`Invalid ISO 27001 classification: ${classification}`);
+  }
+};
+// types/pdfTypes.ts
+// src/types/pdfTypes.ts
+
+export interface PdfSigningConfig {
+    certPdfSignPath: string;
+    certPdfSignPassword: string;
+    certPdfSignType: 'p12' | 'pem';
+  }
+// utils/emailHashTest.ts
+// utils/emailHashTest.ts
+
+import { createHash } from 'crypto';
+
+function sortObjectRecursively(obj: any): any {
+    if (Array.isArray(obj)) {
+      return obj.map(sortObjectRecursively);
+    } else if (obj !== null && typeof obj === 'object') {
+      return Object.keys(obj)
+        .sort()
+        .reduce((result: any, key) => {
+          result[key] = sortObjectRecursively(obj[key]);
+          return result;
+        }, {});
+    }
+    return obj;
+  }
+
+const payload = {
+    to: 'alejandro.prado@coretechnology.ie',
+    subject: 'Email Test from nodejs',
+    body: 'Hello there using OAuth2 and SMTP. With attachments',
+    attachments: [
+      {
+        name: 'PrescriptionAuth_473_20250512_085309.pdf',
+        path: '//cul-cor-app01/CoreSoftware/DEV/Dockets/PrescriptionAuth_473_20250512_085309.pdf'
+      }
+    ]
+  };
+
+  const canonical = JSON.stringify(sortObjectRecursively(payload));
+const hash = createHash('sha256').update(canonical).digest('hex');
+console.log(hash);
+
+// utils/getToken.ts
+import axios from "axios";
+import { getServiceContainer } from "../services/serviceContainer";
+import logger from "./logging";
+
+let cachedToken = "";
+let tokenExpiresAt = 0;
+
+export interface AuthConfig {
+  authUrl: string;
+  authUsername: string;
+  authPassword: string;
+}
+
+export async function getAuthToken(): Promise<string> {
+  const startTime = Date.now();
+  const now = Date.now();
+
+  // Check if we have a valid cached token
+  if (cachedToken && now < tokenExpiresAt) {
+    logger.auth('Using cached auth token', {
+      token_cached: true,
+      expires_in_ms: tokenExpiresAt - now,
+      expires_in_minutes: Math.round((tokenExpiresAt - now) / 60000)
+    });
+    return cachedToken;
+  }
+
+  try {
+    // Get auth config from service container
+    const container = getServiceContainer();
+    const authConfig = container.getAuthConfig();
+    
+    logger.auth('Requesting new auth token', {
+      auth_url: authConfig.authUrl,
+      auth_username: authConfig.authUsername,
+      has_auth_password: !!authConfig.authPassword,
+      password_length: authConfig.authPassword?.length || 0,
+      token_expired: cachedToken && now >= tokenExpiresAt,
+      had_cached_token: !!cachedToken,
+      // VERBOSE ONLY: Show more details for debugging
+      ...(logger.isVerbose() && {
+        verbose_auth_url: authConfig.authUrl,
+        verbose_username: authConfig.authUsername,
+        verbose_password_masked: authConfig.authPassword ? 
+          authConfig.authPassword.substring(0, 3) + '*'.repeat(authConfig.authPassword.length - 3) : 
+          'NOT_SET'
+      })
+    });
+
+    if (!authConfig.authUrl || !authConfig.authUsername || !authConfig.authPassword) {
+      logger.auth('Authentication configuration incomplete', {
+        error_code: 'MISSING_AUTH_CONFIG',
+        has_url: !!authConfig.authUrl,
+        has_username: !!authConfig.authUsername,
+        has_password: !!authConfig.authPassword,
+        duration_ms: Date.now() - startTime
+      });
+      throw new Error("Missing authentication configuration");
+    }
+
+    const authRequestStart = Date.now();
+    
+    logger.auth('Sending authentication request', {
+      auth_url: authConfig.authUrl,
+      request_payload_keys: ['username', 'password'],
+      duration_ms: Date.now() - startTime
+    });
+
+    const response = await axios.post(`${authConfig.authUrl}`, {
+      username: authConfig.authUsername,
+      password: authConfig.authPassword,
+    });
+
+    const authRequestDuration = Date.now() - authRequestStart;
+
+    if (response.status !== 200 || !response.data?.token) {
+      logger.auth('Invalid response from auth server', {
+        error_code: 'INVALID_AUTH_RESPONSE',
+        status_code: response.status,
+        has_token: !!response.data?.token,
+        has_response_data: !!response.data,
+        auth_request_duration_ms: authRequestDuration,
+        total_duration_ms: Date.now() - startTime
+      });
+      throw new Error("Invalid response from auth server");
+    }
+
+    cachedToken = response.data.token;
+    
+    const expiresIn = response.data.expiresIn || 3600; // en segundos
+    tokenExpiresAt = now + expiresIn * 1000 - 10000; // 10s de margen
+    
+    // Calculate token info for logging (but never log the actual token)
+    const tokenLength = cachedToken.length;
+    const tokenPrefix = cachedToken.substring(0, 8);
+    const tokenSuffix = cachedToken.substring(cachedToken.length - 4);
+    
+    logger.auth('Auth token received successfully', {
+      token_length: tokenLength,
+      token_preview: `${tokenPrefix}...${tokenSuffix}`,
+      expires_in_seconds: expiresIn,
+      expires_in_minutes: Math.round(expiresIn / 60),
+      expires_at: new Date(tokenExpiresAt).toISOString(),
+      auth_request_duration_ms: authRequestDuration,
+      total_duration_ms: Date.now() - startTime,
+      // VERBOSE ONLY: More token details for debugging
+      ...(logger.isVerbose() && {
+        verbose_token_full: cachedToken, // ONLY in verbose mode
+        verbose_response_keys: Object.keys(response.data || {}),
+        verbose_response_status: response.status,
+        verbose_response_headers_content_type: response.headers['content-type']
+      })
+    });
+
+    // Safe console log (no sensitive data)
+    console.log(`🔑 Auth token acquired (${tokenLength} chars, expires in ${Math.round(expiresIn/60)}min)`);
+    
+    return cachedToken;
+    
+  } catch (err: any) {
+    const errorDuration = Date.now() - startTime;
+    const isAxiosError = err.response;
+    
+    logger.auth('Authentication failed', {
+      error_code: 'AUTHENTICATION_FAILED',
+      error_message: err.message,
+      duration_ms: errorDuration,
+      is_network_error: !isAxiosError,
+      ...(isAxiosError && {
+        response_status: err.response?.status,
+        response_status_text: err.response?.statusText,
+        response_data_available: !!err.response?.data
+      }),
+      // VERBOSE ONLY: Detailed error info
+      ...(logger.isVerbose() && {
+        verbose_error_stack: err.stack,
+        verbose_response_data: err.response?.data,
+        verbose_request_config: {
+          url: err.config?.url,
+          method: err.config?.method,
+          timeout: err.config?.timeout
+        }
+      })
+    });
+
+    // Safe console error (no sensitive data)
+    console.error(`❌ Authentication failed: ${err.message}`);
+    throw new Error("Authentication failed");
+  }
+}
+// utils/hashUtils.ts
+// utils/hashUtils.ts
+
+import { createHash } from 'crypto';
+
+/**
+ * Shared hash utility for consistent hashing across all services
+ * 
+ * This ensures that the GDPR token generation and email validation
+ * use exactly the same hashing algorithm.
+ */
+
+/**
+ * Sort object keys recursively for consistent hashing
+ * This is the SINGLE SOURCE OF TRUTH for object sorting
+ */
+export function sortObjectRecursively(obj: any): any {
+  if (Array.isArray(obj)) {
+    return obj.map(sortObjectRecursively);
+  } else if (obj !== null && typeof obj === 'object') {
+    return Object.keys(obj)
+      .sort()
+      .reduce((result: any, key) => {
+        result[key] = sortObjectRecursively(obj[key]);
+        return result;
+      }, {});
+  }
+  return obj;
+}
+
+/**
+ * Generate consistent SHA-256 hash of any payload
+ * This is the SINGLE SOURCE OF TRUTH for payload hashing
+ */
+export function generatePayloadHash(payload: any): string {
+  const canonicalJson = JSON.stringify(sortObjectRecursively(payload));
+  return createHash('sha256').update(canonicalJson).digest('hex');
+}
+// utils/logging/core/config.ts
+/**
+ * 🔧 CORE-SERVICES: Logger Configuration
+ * 
+ * Configuration utilities and helpers for the logging system
+ * Centralized configuration logic following SOLID principles
+ * 
+ * Classification: INTERNAL (service infrastructure)
+ */
+
+import path from 'path';
+import fs from 'fs';
+import { LogMode, LogLevel, LoggerConfig } from './types';
+
+/**
+ * Sensitive field patterns for data sanitization
+ * More specific to core-services operations
+ */
+export const SENSITIVE_PATTERNS = [
+  /password/i,
+  /secret/i,
+  /token/i,
+  /key/i,
+  /auth/i,
+  /credential/i,
+  /private/i,
+  /email/i,
+  /mail/i,
+  /recipient/i,
+  /sender/i,
+  /subject/i,
+  /body/i,
+  /content/i,
+  /payload/i,
+  /data/i
+];
+
+/**
+ * Determine log mode from environment
+ */
+export const getLogMode = (): LogMode => {
+  const mode = process.env.LOG_LEVEL?.toLowerCase();
+  return (mode === 'verbose' || mode === 'debug') ? 'verbose' : 'normal';
+};
+
+/**
+ * Get effective log level based on mode and environment
+ */
+export const getLogLevel = (): LogLevel => {
+  const mode = getLogMode();
+  const envLevel = process.env.LOG_LEVEL?.toUpperCase();
+  
+  if (mode === 'verbose') {
+    return 'DEBUG';
+  }
+  
+  // Normal mode levels
+  const validLevels: LogLevel[] = ['INFO', 'WARN', 'ERROR'];
+  if (envLevel && validLevels.includes(envLevel as LogLevel)) {
+    return envLevel as LogLevel;
+  }
+  
+  return process.env.NODE_ENV === 'production' ? 'INFO' : 'DEBUG';
+};
+
+/**
+ * Get service name from environment or default
+ */
+export const getServiceName = (): string => {
+  return process.env.SERVICE_NAME || 'core-services';
+};
+
+/**
+ * Get environment name
+ */
+export const getEnvironment = (): string => {
+  return process.env.NODE_ENV || 'development';
+};
+
+/**
+ * Create logs directory lazily and safely
+ */
+export const ensureLogsDirectory = (): string => {
+  const logsDir = path.join(process.cwd(), 'logs');
+  if (!fs.existsSync(logsDir)) {
+    fs.mkdirSync(logsDir, { recursive: true });
+  }
+  return logsDir;
+};
+
+/**
+ * Create complete logger configuration
+ */
+export const createLoggerConfig = (): LoggerConfig => {
+  return {
+    mode: getLogMode(),
+    level: getLogLevel(),
+    environment: getEnvironment(),
+    service: getServiceName(),
+    logsDirectory: ensureLogsDirectory()
+  };
+};
+
+/**
+ * Sanitize sensitive data based on log mode
+ * Single Responsibility: Only handles data sanitization
+ */
+export const sanitizeLogData = (data: any, mode: LogMode): any => {
+  // In verbose mode, don't sanitize anything
+  if (mode === 'verbose') {
+    return data;
+  }
+  
+  if (typeof data !== 'object' || data === null) {
+    return data;
+  }
+  
+  if (Array.isArray(data)) {
+    return data.map(item => sanitizeLogData(item, mode));
+  }
+  
+  const sanitized: any = {};
+  
+  for (const [key, value] of Object.entries(data)) {
+    const isSensitive = SENSITIVE_PATTERNS.some(pattern => pattern.test(key));
+    
+    if (isSensitive) {
+      sanitized[key] = '[REDACTED]';
+    } else if (typeof value === 'object' && value !== null) {
+      sanitized[key] = sanitizeLogData(value, mode);
+    } else {
+      sanitized[key] = value;
+    }
+  }
+  
+  return sanitized;
+};
+
+/**
+ * Format uptime to human readable string
+ */
+export const formatUptime = (seconds: number): string => {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  
+  if (hours > 0) {
+    return `${hours}h ${minutes}m ${secs}s`;
+  } else if (minutes > 0) {
+    return `${minutes}m ${secs}s`;
+  } else {
+    return `${secs}s`;
+  }
+};
+
+/**
+ * Validate log level
+ */
+export const isValidLogLevel = (level: string): level is LogLevel => {
+  const validLevels: LogLevel[] = ['DEBUG', 'INFO', 'WARN', 'ERROR'];
+  return validLevels.includes(level as LogLevel);
+};
+
+/**
+ * Validate service operation
+ */
+export const isValidServiceOperation = (operation: string): boolean => {
+  const validOperations = [
+    'PDF_GENERATION',
+    'ZPL_GENERATION', 
+    'EMAIL_OPERATION',
+    'SERVICE_CONTAINER',
+    'AUTHENTICATION',
+    'SYSTEM',
+    'API_REQUEST'
+  ];
+  return validOperations.includes(operation);
+};
+
+/**
+ * Default logger metadata
+ */
+export const getDefaultMeta = (config: LoggerConfig) => {
+  return {
+    service: config.service,
+    environment: config.environment,
+    mode: config.mode
+  };
+};
+// utils/logging/core/logger.ts
+/**
+ * 🔧 CORE-SERVICES: Core Logger
+ * 
+ * Base logger implementation with core functionality
+ * Follows SOLID principles with single responsibility
+ * 
+ * Classification: INTERNAL (service infrastructure)
+ */
+
+import { Logger } from 'winston';
+import { 
+  LogLevel, 
+  ServiceOperation, 
+  CoreServicesLogEntry, 
+  ILogger, 
+  ICoreServicesLogger,
+  LoggerConfig 
+} from './types';
+
+/**
+ * Base CoreServices Logger Class
+ * Single Responsibility: Core logging functionality
+ */
+export class CoreServicesLogger implements ICoreServicesLogger {
+  protected logger: Logger;
+  protected config: LoggerConfig;
+  
+  constructor(logger: Logger, config: LoggerConfig) {
+    this.logger = logger;
+    this.config = config;
+  }
+  
+  /**
+   * Debug logging (verbose mode only)
+   */
+  debug(message: string, meta?: Partial<CoreServicesLogEntry>): void {
+    this.log('DEBUG', message, meta);
+  }
+  
+  /**
+   * Info logging
+   */
+  info(message: string, meta?: Partial<CoreServicesLogEntry>): void {
+    this.log('INFO', message, meta);
+  }
+  
+  /**
+   * Warning logging
+   */
+  warn(message: string, meta?: Partial<CoreServicesLogEntry>): void {
+    this.log('WARN', message, meta);
+  }
+  
+  /**
+   * Error logging
+   */
+  error(message: string, meta?: Partial<CoreServicesLogEntry>): void {
+    this.log('ERROR', message, meta);
+  }
+  
+  /**
+   * PDF generation logging
+   */
+  pdf(message: string, meta?: Partial<CoreServicesLogEntry>): void {
+    this.log('INFO', message, {
+      ...meta,
+      operation: 'PDF_GENERATION'
+    });
+  }
+  
+  /**
+   * ZPL label generation logging
+   */
+  zpl(message: string, meta?: Partial<CoreServicesLogEntry>): void {
+    this.log('INFO', message, {
+      ...meta,
+      operation: 'ZPL_GENERATION'
+    });
+  }
+  
+  /**
+   * Email operation logging
+   */
+  email(message: string, meta?: Partial<CoreServicesLogEntry>): void {
+    this.log('INFO', message, {
+      ...meta,
+      operation: 'EMAIL_OPERATION'
+    });
+  }
+  
+  /**
+   * Service container logging
+   */
+  container(message: string, meta?: Partial<CoreServicesLogEntry>): void {
+    this.log('INFO', message, {
+      ...meta,
+      operation: 'SERVICE_CONTAINER'
+    });
+  }
+  
+  /**
+   * Authentication logging
+   */
+  auth(message: string, meta?: Partial<CoreServicesLogEntry>): void {
+    this.log('INFO', message, {
+      ...meta,
+      operation: 'AUTHENTICATION'
+    });
+  }
+  
+  /**
+   * API request logging
+   */
+  request(message: string, meta?: Partial<CoreServicesLogEntry>): void {
+    this.log('INFO', message, {
+      ...meta,
+      operation: 'API_REQUEST'
+    });
+  }
+  
+  /**
+   * System operation logging
+   */
+  system(message: string, meta?: Partial<CoreServicesLogEntry>): void {
+    this.log('INFO', message, {
+      ...meta,
+      operation: 'SYSTEM'
+    });
+  }
+  
+  /**
+   * Performance logging with automatic duration calculation
+   */
+  performance(operation: ServiceOperation, startTime: number, meta?: Partial<CoreServicesLogEntry>): void {
+    const duration = Date.now() - startTime;
+    this.log('INFO', `${operation} completed`, {
+      ...meta,
+      operation,
+      duration_ms: duration
+    });
+  }
+  
+  /**
+   * Create child logger with default metadata
+   */
+  child(defaultMeta: Partial<CoreServicesLogEntry>): ICoreServicesLogger {
+    const childLogger = this.logger.child(defaultMeta);
+    return new CoreServicesLogger(childLogger, this.config);
+  }
+  
+  /**
+   * Check if current mode is verbose
+   */
+  isVerbose(): boolean {
+    return this.config.mode === 'verbose';
+  }
+  
+  /**
+   * Core logging method - PROTECTED so subclasses can access it
+   * This fixes the "Property 'log' is private" error
+   */
+  protected log(level: LogLevel, message: string, meta?: Partial<CoreServicesLogEntry>): void {
+    this.logger.log(level, message, meta);
+  }
+  
+  /**
+   * Get logger configuration
+   */
+  getConfig(): LoggerConfig {
+    return this.config;
+  }
+  
+  /**
+   * Get underlying Winston logger (for advanced usage)
+   */
+  getWinstonLogger(): Logger {
+    return this.logger;
+  }
+}
+// utils/logging/core/types.ts
+/**
+ * 🔧 CORE-SERVICES: Logger Types
+ * 
+ * Core types and interfaces for the logging system
+ * Centralized type definitions following SOLID principles
+ * 
+ * Classification: INTERNAL (service infrastructure)
+ */
+
+/**
+ * Log levels for core-services operations - Extended for legacy compatibility
+ */
+export type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR' | 'TRACE' | 'FATAL' | 'CRITICAL' | 'ALERT' | 'EMERGENCY' | 'NOTICE' | 'AUDIT';
+
+/**
+ * Core-services specific log categories
+ */
+export type ServiceOperation = 
+  | 'PDF_GENERATION' 
+  | 'ZPL_GENERATION' 
+  | 'EMAIL_OPERATION' 
+  | 'SERVICE_CONTAINER' 
+  | 'AUTHENTICATION' 
+  | 'SYSTEM' 
+  | 'API_REQUEST';
+
+/**
+ * Log modes for data sensitivity
+ */
+export type LogMode = 'normal' | 'verbose';
+
+/**
+ * Structured log entry interface
+ */
+export interface CoreServicesLogEntry {
+  // Core message
+  message: string;
+  level?: LogLevel;
+  
+  // Service-specific context
+  operation?: ServiceOperation;
+  correlation_id?: string;
+  trace_id?: string;
+  
+  // Performance metrics
+  duration_ms?: number;
+  file_size_bytes?: number;
+  
+  // Business context
+  client_name?: string;
+  user_id?: string;
+  request_id?: string;
+  
+  // Technical context
+  error_code?: string;
+  stack?: string;
+  endpoint?: string;
+  method?: string;
+  status_code?: number;
+  
+  // Service-specific data
+  pdf_pages?: number;
+  zpl_labels?: number;
+  email_recipients?: number;
+  attachment_count?: number;
+  
+  // Additional data (will be sanitized in normal mode)
+  [key: string]: any;
+}
+
+/**
+ * System metrics interface for performance monitoring
+ */
+export interface SystemMetrics {
+  timestamp: string;
+  memory: {
+    rss: number;           // Resident Set Size (bytes)
+    heapTotal: number;     // Total heap (bytes)
+    heapUsed: number;      // Used heap (bytes)
+    external: number;      // External memory (bytes)
+    arrayBuffers: number;  // ArrayBuffers (bytes)
+  };
+  cpu: {
+    userCPUTime: number;   // User CPU time (microseconds)
+    systemCPUTime: number; // System CPU time (microseconds)
+    cpuUsagePercent?: number; // CPU usage percentage (calculated)
+  };
+  process: {
+    pid: number;
+    ppid: number;
+    uptime: number;        // Process uptime (seconds)
+    uptimeFormatted: string; // Human readable uptime
+    platform: string;
+    nodeVersion: string;
+  };
+  system?: {
+    totalMemory?: number;  // Total system memory (bytes)
+    freeMemory?: number;   // Free system memory (bytes)
+    loadAverage?: number[]; // Load average (Unix-like systems)
+    cpuCount?: number;     // Number of CPU cores
+  };
+  gc?: {
+    heapSizeLimit: number;
+    totalHeapSizeExecutable: number;
+    usedHeapSize: number;
+  };
+}
+
+/**
+ * Daily statistics interface for business metrics
+ */
+export interface DailyStats {
+  date: string;
+  period: {
+    start: string;
+    end: string;
+  };
+  operations: {
+    emails_sent: number;
+    emails_failed: number;
+    pdfs_generated: number;
+    pdfs_failed: number;
+    zpl_labels_generated: number;
+    zpl_labels_failed: number;
+    total_requests: number;
+    failed_requests: number;
+  };
+  performance: {
+    avg_email_duration_ms: number;
+    avg_pdf_duration_ms: number;
+    avg_zpl_duration_ms: number;
+    peak_memory_mb: number;
+    avg_cpu_percent: number;
+    max_concurrent_operations: number;
+  };
+  errors: {
+    authentication_failures: number;
+    service_errors: number;
+    system_errors: number;
+    total_errors: number;
+  };
+  system: {
+    restarts: number;
+    uptime_hours: number;
+    total_uptime_hours: number;
+  };
+}
+
+/**
+ * Error types for statistics categorization
+ */
+export type ErrorType = 'auth' | 'service' | 'system';
+
+/**
+ * Logger configuration interface
+ */
+export interface LoggerConfig {
+  mode: LogMode;
+  level: LogLevel;
+  environment: string;
+  service: string;
+  logsDirectory: string;
+}
+
+/**
+ * Base logger interface for core functionality
+ */
+export interface ILogger {
+  debug(message: string, meta?: Partial<CoreServicesLogEntry>): void;
+  info(message: string, meta?: Partial<CoreServicesLogEntry>): void;
+  warn(message: string, meta?: Partial<CoreServicesLogEntry>): void;
+  error(message: string, meta?: Partial<CoreServicesLogEntry>): void;
+  isVerbose(): boolean;
+  child(defaultMeta: Partial<CoreServicesLogEntry>): ILogger;
+}
+
+/**
+ * Enhanced logger interface with service-specific methods
+ */
+export interface ICoreServicesLogger extends ILogger {
+  // Service-specific logging methods
+  pdf(message: string, meta?: Partial<CoreServicesLogEntry>): void;
+  zpl(message: string, meta?: Partial<CoreServicesLogEntry>): void;
+  email(message: string, meta?: Partial<CoreServicesLogEntry>): void;
+  container(message: string, meta?: Partial<CoreServicesLogEntry>): void;
+  auth(message: string, meta?: Partial<CoreServicesLogEntry>): void;
+  request(message: string, meta?: Partial<CoreServicesLogEntry>): void;
+  system(message: string, meta?: Partial<CoreServicesLogEntry>): void;
+  
+  // Performance logging
+  performance(operation: ServiceOperation, startTime: number, meta?: Partial<CoreServicesLogEntry>): void;
+}
+
+/**
+ * Metrics collector interface
+ */
+export interface IMetricsCollector {
+  collectMetrics(): SystemMetrics;
+  logMetrics(): void;
+  startMetricsCollection(intervalMs?: number): void;
+  stopMetricsCollection(): void;
+  getMetricsSummary(): string;
+}
+
+/**
+ * Daily stats collector interface
+ */
+export interface IDailyStatsCollector {
+  recordEmail(success: boolean, durationMs?: number): void;
+  recordPdf(success: boolean, durationMs?: number): void;
+  recordZpl(success: boolean, durationMs?: number): void;
+  recordError(type: ErrorType): void;
+  updatePerformanceMetrics(memoryMB: number, cpuPercent?: number): void;
+  startOperation(): void;
+  endOperation(): void;
+  getDailySummary(stats?: DailyStats): string;
+  getCurrentStats(): DailyStats;
+  startDailyStats(): void;
+  stopDailyStats(): void;
+}
+
+/**
+ * Enhanced logger interface with metrics and stats
+ */
+export interface IEnhancedLogger extends ICoreServicesLogger {
+  metrics: IMetricsCollector;
+  dailyStats: IDailyStatsCollector;
+  
+  // System metrics
+  systemMetrics(message: string, meta?: Partial<CoreServicesLogEntry>): void;
+  
+  // Lifecycle methods
+  startMetrics(intervalMs?: number): void;
+  stopMetrics(): void;
+  
+  // Daily stats methods
+  getDailySummary(): string;
+  getCurrentDailyStats(): DailyStats;
+}
+// utils/logging/formatter/humanMetrics.ts
+/**
+ * 🧠 CORE-SERVICES: Human-Friendly Metrics Formatter
+ * 
+ * Makes system metrics readable for humans instead of machines
+ * Because nobody wants to calculate 296488960 bytes in their head
+ */
+
+import { SystemMetrics } from '../core/types';
+
+/**
+ * Convert bytes to human readable format
+ */
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  
+  return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
+}
+
+/**
+ * Convert microseconds to milliseconds with proper formatting
+ */
+function formatCpuTime(microseconds: number): string {
+  const milliseconds = microseconds / 1000;
+  if (milliseconds < 1000) {
+    return `${milliseconds.toFixed(1)}ms`;
+  }
+  return `${(milliseconds / 1000).toFixed(2)}s`;
+}
+
+/**
+ * Format CPU percentage with proper rounding
+ */
+function formatCpuPercent(percent?: number): string {
+  if (percent === undefined) return 'N/A';
+  if (percent < 0.01) return '<0.01%';
+  if (percent > 99.99) return '>99.99%';
+  return `${percent.toFixed(2)}%`;
+}
+
+/**
+ * Create human-readable metrics summary
+ */
+export function createHumanMetricsSummary(metrics: SystemMetrics): string {
+  const memUsed = formatBytes(metrics.memory.heapUsed);
+  const memTotal = formatBytes(metrics.memory.heapTotal);
+  const memRss = formatBytes(metrics.memory.rss);
+  const cpuPercent = formatCpuPercent(metrics.cpu.cpuUsagePercent);
+  const uptime = metrics.process.uptimeFormatted;
+  
+  let summary = `🖥️  Memory: ${memUsed}/${memTotal} (RSS: ${memRss}) | ⚡ CPU: ${cpuPercent} | ⏱️  Uptime: ${uptime}`;
+  
+  if (metrics.system) {
+    const totalSysMem = formatBytes(metrics.system.totalMemory || 0);
+    const freeSysMem = formatBytes(metrics.system.freeMemory || 0);
+    const usedSysMem = formatBytes((metrics.system.totalMemory || 0) - (metrics.system.freeMemory || 0));
+    summary += ` | 🏠 System: ${usedSysMem}/${totalSysMem} (${freeSysMem} free)`;
+  }
+  
+  return summary;
+}
+
+/**
+ * Create detailed human-readable metrics
+ */
+export function createDetailedHumanMetrics(metrics: SystemMetrics): any {
+  return {
+    timestamp: metrics.timestamp,
+    memory: {
+      heap_used: formatBytes(metrics.memory.heapUsed),
+      heap_total: formatBytes(metrics.memory.heapTotal),
+      rss: formatBytes(metrics.memory.rss),
+      external: formatBytes(metrics.memory.external),
+      array_buffers: formatBytes(metrics.memory.arrayBuffers)
+    },
+    cpu: {
+      usage_percent: formatCpuPercent(metrics.cpu.cpuUsagePercent),
+      user_time: formatCpuTime(metrics.cpu.userCPUTime),
+      system_time: formatCpuTime(metrics.cpu.systemCPUTime)
+    },
+    process: {
+      pid: metrics.process.pid,
+      uptime: metrics.process.uptimeFormatted,
+      platform: metrics.process.platform,
+      node_version: metrics.process.nodeVersion
+    },
+    ...(metrics.system && {
+      system: {
+        total_memory: formatBytes(metrics.system.totalMemory || 0),
+        free_memory: formatBytes(metrics.system.freeMemory || 0),
+        used_memory: formatBytes((metrics.system.totalMemory || 0) - (metrics.system.freeMemory || 0)),
+        cpu_cores: metrics.system.cpuCount || 'N/A'
+      }
+    })
+  };
+}
+
+/**
+ * Create ultra-compact metrics for logs
+ */
+export function createCompactMetrics(metrics: SystemMetrics): string {
+  const memMB = Math.round(metrics.memory.heapUsed / 1024 / 1024);
+  const cpuPercent = metrics.cpu.cpuUsagePercent?.toFixed(1) || 'N/A';
+  const uptime = metrics.process.uptimeFormatted;
+  
+  return `${memMB}MB | ${cpuPercent}% | ${uptime}`;
+}
+
+/**
+ * Format for console output with emojis and colors
+ */
+export function createConsoleMetrics(metrics: SystemMetrics): string {
+  const memUsed = formatBytes(metrics.memory.heapUsed);
+  const memTotal = formatBytes(metrics.memory.heapTotal);
+  const cpuPercent = metrics.cpu.cpuUsagePercent || 0;
+  const uptime = metrics.process.uptimeFormatted;
+  
+  // Add emoji indicators based on usage
+  let memEmoji = '💚'; // Green
+  const memUsage = (metrics.memory.heapUsed / metrics.memory.heapTotal) * 100;
+  if (memUsage > 80) memEmoji = '🔴'; // Red
+  else if (memUsage > 60) memEmoji = '🟡'; // Yellow
+  
+  let cpuEmoji = '💚'; // Green  
+  if (cpuPercent > 80) cpuEmoji = '🔴'; // Red
+  else if (cpuPercent > 50) cpuEmoji = '🟡'; // Yellow
+  
+  return `${memEmoji} Memory: ${memUsed}/${memTotal} (${memUsage.toFixed(1)}%) | ${cpuEmoji} CPU: ${formatCpuPercent(cpuPercent)} | ⏰ Uptime: ${uptime}`;
+}
+// utils/logging/index.ts
+/**
+ * 🚀 CORE-SERVICES: Logger System
+ * 
+ * Clean barrel exports for the logging system
+ * Provides clean imports following SOLID principles
+ * 
+ * Classification: INTERNAL (service infrastructure)
+ * 
+ * Usage:
+ * import logger from '@/utils/logging';
+ * import { CoreServicesLogger, LogLevel } from '@/utils/logging';
+ */
+
+// Re-export all types for clean imports
+export type {
+  LogLevel,
+  ServiceOperation,
+  LogMode,
+  CoreServicesLogEntry,
+  SystemMetrics,
+  DailyStats,
+  ErrorType,
+  LoggerConfig,
+  ILogger,
+  ICoreServicesLogger,
+  IMetricsCollector,
+  IDailyStatsCollector,
+  IEnhancedLogger
+} from './core/types';
+
+// Re-export configuration utilities
+export {
+  getLogMode,
+  getLogLevel,
+  getServiceName,
+  getEnvironment,
+  ensureLogsDirectory,
+  createLoggerConfig,
+  sanitizeLogData,
+  formatUptime,
+  isValidLogLevel,
+  isValidServiceOperation,
+  getDefaultMeta,
+  SENSITIVE_PATTERNS
+} from './core/config';
+
+// Re-export core logger class
+export { CoreServicesLogger } from './core/logger';
+
+// Import human-friendly formatters
+import { 
+  createHumanMetricsSummary, 
+  createDetailedHumanMetrics, 
+  createConsoleMetrics 
+} from './formatter/humanMetrics';
+
+// TODO: Import collectors when created  
+// export { MetricsCollector } from './collectors/metricsCollector';
+// export { DailyStatsCollector } from './collectors/dailyStatsCollector';
+
+// TODO: Import enhanced logger when created
+// export { EnhancedCoreServicesLogger } from './enhancedLogger';
+
+// Temporary implementation for current compatibility
+// This will be replaced when we move formatters and collectors to separate files
+import { createLogger, format, transports, Logger } from 'winston';
+import DailyRotateFile from 'winston-daily-rotate-file';
+import { 
+  createLoggerConfig, 
+  sanitizeLogData, 
+  getDefaultMeta,
+  formatUptime 
+} from './core/config';
+import { 
+  CoreServicesLogEntry, 
+  SystemMetrics, 
+  DailyStats, 
+  IEnhancedLogger,
+  IMetricsCollector,
+  IDailyStatsCollector,
+  ErrorType 
+} from './core/types';
+import { CoreServicesLogger } from './core/logger';
+import path from 'path';
+
+// Temporary formatters (will be moved to separate files)
+const createStructuredFormat = () => {
+  return format.printf((info) => {
+    const config = createLoggerConfig();
+    const {
+      timestamp,
+      level,
+      message,
+      operation,
+      correlation_id,
+      service = config.service,
+      environment = config.environment,
+      ...meta
+    } = info;
+    
+    const sanitizedMeta = sanitizeLogData(meta, config.mode);
+    
+    const logEntry: any = {
+      timestamp,
+      level: level.toUpperCase(),
+      service,
+      environment,
+      mode: config.mode,
+      message
+    };
+    
+    if (operation) {
+      logEntry.operation = operation;
+    }
+    
+    if (correlation_id) {
+      logEntry.correlation_id = correlation_id;
+    }
+    
+    if (Object.keys(sanitizedMeta).length > 0) {
+      logEntry.metadata = sanitizedMeta;
+    }
+    
+    return JSON.stringify(logEntry);
+  });
+};
+
+const createConsoleFormat = () => {
+  return format.printf((info) => {
+    const config = createLoggerConfig();
+    const {
+      timestamp,
+      level,
+      message,
+      operation,
+      correlation_id,
+      duration_ms,
+      ...meta
+    } = info;
+    
+    let output = `${timestamp} [${level.toUpperCase()}]`;
+    
+    if (config.mode === 'verbose') {
+      output += ` [VERBOSE]`;
+    }
+    
+    if (operation) {
+      output += ` [${operation}]`;
+    }
+    
+    if (correlation_id && typeof correlation_id === 'string') {
+      output += ` [${correlation_id.substring(0, 8)}...]`;
+    }
+    
+    output += `: ${message}`;
+    
+    if (duration_ms) {
+      output += ` (${duration_ms}ms)`;
+    }
+    
+    const sanitizedMeta = sanitizeLogData(meta, config.mode);
+    if (config.mode === 'verbose' || level === 'error') {
+      if (Object.keys(sanitizedMeta).length > 0) {
+        output += `\n  📋 ${JSON.stringify(sanitizedMeta, null, 2)}`;
+      }
+    }
+    
+    return output;
+  });
+};
+
+// Temporary collectors (will be moved to separate files)
+class TempMetricsCollector implements IMetricsCollector {
+  private previousCPUUsage: NodeJS.CpuUsage | null = null;
+  private previousTimestamp: number | null = null;
+  private metricsLogger: Logger;
+  private intervalId: NodeJS.Timeout | null = null;
+  private dailyStats: TempDailyStatsCollector;
+  
+  constructor(config: any, dailyStats: TempDailyStatsCollector) {
+    this.dailyStats = dailyStats;
+    this.metricsLogger = createLogger({
+      levels: {
+        ERROR: 0, WARN: 1, INFO: 2, DEBUG: 3
+      },
+      level: 'INFO',
+      format: format.combine(
+        format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss.SSS' }),
+        format.printf((info) => JSON.stringify(info))
+      ),
+      transports: [
+        new DailyRotateFile({
+          filename: path.join(config.logsDirectory, 'core-services-metrics-%DATE%.log'),
+          datePattern: 'YYYY-MM-DD',
+          zippedArchive: true,
+          maxSize: '25m',
+          maxFiles: '30d',
+          level: 'INFO'
+        })
+      ],
+      exitOnError: false
+    });
+  }
+  
+  collectMetrics(): SystemMetrics {
+    const memUsage = process.memoryUsage();
+    const cpuUsage = process.cpuUsage();
+    const currentTime = Date.now();
+    
+    let cpuUsagePercent: number | undefined;
+    if (this.previousCPUUsage && this.previousTimestamp) {
+      const timeDiff = currentTime - this.previousTimestamp;
+      const userDiff = cpuUsage.user - this.previousCPUUsage.user;
+      const systemDiff = cpuUsage.system - this.previousCPUUsage.system;
+      const totalCPUTime = (userDiff + systemDiff) / 1000;
+      cpuUsagePercent = Math.min(100, (totalCPUTime / timeDiff) * 100);
+    }
+    
+    this.previousCPUUsage = cpuUsage;
+    this.previousTimestamp = currentTime;
+    
+    const uptimeSeconds = process.uptime();
+    
+    return {
+      timestamp: new Date().toISOString(),
+      memory: {
+        rss: memUsage.rss,
+        heapTotal: memUsage.heapTotal,
+        heapUsed: memUsage.heapUsed,
+        external: memUsage.external,
+        arrayBuffers: memUsage.arrayBuffers
+      },
+      cpu: {
+        userCPUTime: cpuUsage.user,
+        systemCPUTime: cpuUsage.system,
+        ...(cpuUsagePercent !== undefined && { cpuUsagePercent })
+      },
+      process: {
+        pid: process.pid,
+        ppid: process.ppid || 0,
+        uptime: uptimeSeconds,
+        uptimeFormatted: formatUptime(uptimeSeconds),
+        platform: process.platform,
+        nodeVersion: process.version
+      }
+    };
+  }
+  
+  /**
+   * Log current metrics and update daily stats - NOW WITH HUMAN-FRIENDLY FORMAT!
+   */
+  logMetrics(): void {
+    const metrics = this.collectMetrics();
+    
+    // Human-friendly version for log file
+    const humanMetrics = createDetailedHumanMetrics(metrics);
+    this.metricsLogger.log('INFO', 'SYSTEM_METRICS', humanMetrics);
+    
+    // Update daily stats with performance data
+    const memoryMB = Math.round(metrics.memory.heapUsed / 1024 / 1024);
+    this.dailyStats.updatePerformanceMetrics(memoryMB, metrics.cpu.cpuUsagePercent);
+  }
+  
+  startMetricsCollection(intervalMs: number = 30000): void {
+    if (this.intervalId) return;
+    this.logMetrics();
+    this.intervalId = setInterval(() => this.logMetrics(), intervalMs);
+  }
+  
+  stopMetricsCollection(): void {
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
+  }
+  
+  /**
+   * Get human-readable metrics summary with emojis and proper units
+   */
+  getMetricsSummary(): string {
+    const metrics = this.collectMetrics();
+    return createConsoleMetrics(metrics);
+  }
+}
+
+class TempDailyStatsCollector implements IDailyStatsCollector {
+  private currentStats: DailyStats;
+  
+  constructor() {
+    this.currentStats = this.initializeStats();
+  }
+  
+  private initializeStats(): DailyStats {
+    const now = new Date();
+    return {
+      date: now.toISOString().split('T')[0],
+      period: { start: now.toISOString(), end: '' },
+      operations: {
+        emails_sent: 0, emails_failed: 0, pdfs_generated: 0, pdfs_failed: 0,
+        zpl_labels_generated: 0, zpl_labels_failed: 0, total_requests: 0, failed_requests: 0
+      },
+      performance: {
+        avg_email_duration_ms: 0, avg_pdf_duration_ms: 0, avg_zpl_duration_ms: 0,
+        peak_memory_mb: 0, avg_cpu_percent: 0, max_concurrent_operations: 0
+      },
+      errors: { authentication_failures: 0, service_errors: 0, system_errors: 0, total_errors: 0 },
+      system: { restarts: 0, uptime_hours: 0, total_uptime_hours: 0 }
+    };
+  }
+  
+  recordEmail(success: boolean, durationMs?: number): void {
+    if (success) this.currentStats.operations.emails_sent++;
+    else this.currentStats.operations.emails_failed++;
+    this.currentStats.operations.total_requests++;
+  }
+  
+  recordPdf(success: boolean, durationMs?: number): void {
+    if (success) this.currentStats.operations.pdfs_generated++;
+    else this.currentStats.operations.pdfs_failed++;
+    this.currentStats.operations.total_requests++;
+  }
+  
+  recordZpl(success: boolean, durationMs?: number): void {
+    if (success) this.currentStats.operations.zpl_labels_generated++;
+    else this.currentStats.operations.zpl_labels_failed++;
+    this.currentStats.operations.total_requests++;
+  }
+  
+  recordError(type: ErrorType): void {
+    switch (type) {
+      case 'auth': this.currentStats.errors.authentication_failures++; break;
+      case 'service': this.currentStats.errors.service_errors++; break;
+      case 'system': this.currentStats.errors.system_errors++; break;
+    }
+    this.currentStats.errors.total_errors++;
+  }
+  
+  updatePerformanceMetrics(memoryMB: number, cpuPercent?: number): void {
+    this.currentStats.performance.peak_memory_mb = Math.max(
+      this.currentStats.performance.peak_memory_mb, memoryMB
+    );
+  }
+  
+  startOperation(): void {}
+  endOperation(): void {}
+  
+  getDailySummary(): string {
+    const s = this.currentStats;
+    return `Emails: ${s.operations.emails_sent}, PDFs: ${s.operations.pdfs_generated}, ` +
+           `ZPL: ${s.operations.zpl_labels_generated}, Errors: ${s.errors.total_errors}`;
+  }
+  
+  getCurrentStats(): DailyStats { return this.currentStats; }
+  startDailyStats(): void {}
+  stopDailyStats(): void {}
+}
+
+// Enhanced logger with temporary implementation
+class TempEnhancedLogger extends CoreServicesLogger implements IEnhancedLogger {
+  public metrics: IMetricsCollector;
+  public dailyStats: TempDailyStatsCollector;
+  
+  constructor(logger: Logger, config: any) {
+    super(logger, config);
+    this.dailyStats = new TempDailyStatsCollector();
+    this.metrics = new TempMetricsCollector(config, this.dailyStats);
+  }
+  
+  systemMetrics(message: string, meta?: Partial<CoreServicesLogEntry>): void {
+    const summary = this.metrics.getMetricsSummary();
+    this.system(`${message} - ${summary}`, meta);
+  }
+  
+  startMetrics(intervalMs: number = 30000): void {
+    this.metrics.startMetricsCollection(intervalMs);
+    this.dailyStats.startDailyStats();
+  }
+  
+  stopMetrics(): void {
+    this.metrics.stopMetricsCollection();
+    this.dailyStats.stopDailyStats();
+  }
+  
+  getDailySummary(): string {
+    return this.dailyStats.getDailySummary();
+  }
+  
+  getCurrentDailyStats(): DailyStats {
+    return this.dailyStats.getCurrentStats();
+  }
+  
+  // Override methods to include stats tracking
+  pdf(message: string, meta?: Partial<CoreServicesLogEntry>): void {
+    const success = !message.toLowerCase().includes('error') && !message.toLowerCase().includes('failed');
+    this.dailyStats.recordPdf(success, meta?.duration_ms);
+    super.pdf(message, meta);
+  }
+  
+  email(message: string, meta?: Partial<CoreServicesLogEntry>): void {
+    const success = !message.toLowerCase().includes('error') && !message.toLowerCase().includes('failed');
+    this.dailyStats.recordEmail(success, meta?.duration_ms);
+    super.email(message, meta);
+  }
+  
+  zpl(message: string, meta?: Partial<CoreServicesLogEntry>): void {
+    const success = !message.toLowerCase().includes('error') && !message.toLowerCase().includes('failed');
+    this.dailyStats.recordZpl(success, meta?.duration_ms);
+    super.zpl(message, meta);
+  }
+  
+  error(message: string, meta?: Partial<CoreServicesLogEntry>): void {
+    const operation = meta?.operation;
+    if (operation === 'AUTHENTICATION') {
+      this.dailyStats.recordError('auth');
+    } else if (operation && ['PDF_GENERATION', 'ZPL_GENERATION', 'EMAIL_OPERATION'].includes(operation)) {
+      this.dailyStats.recordError('service');
+    } else {
+      this.dailyStats.recordError('system');
+    }
+    super.error(message, meta);
+  }
+}
+
+// Create the Winston logger with custom levels
+const createWinstonLogger = (): Logger => {
+  const config = createLoggerConfig();
+  
+  // Define custom levels for Winston (UPPERCASE)
+  const customLevels = {
+    levels: {
+      ERROR: 0,
+      FATAL: 0,
+      CRITICAL: 0,
+      ALERT: 0,
+      EMERGENCY: 0,
+      WARN: 1,
+      AUDIT: 1,
+      INFO: 2,
+      NOTICE: 2,
+      DEBUG: 3,
+      TRACE: 4
+    },
+    colors: {
+      ERROR: 'red',
+      FATAL: 'red', 
+      CRITICAL: 'red',
+      ALERT: 'red',
+      EMERGENCY: 'red',
+      WARN: 'yellow',
+      AUDIT: 'yellow',
+      INFO: 'green',
+      NOTICE: 'green', 
+      DEBUG: 'blue',
+      TRACE: 'blue'
+    }
+  };
+  
+  return createLogger({
+    levels: customLevels.levels,  // ← AÑADIR ESTO
+    level: config.level,
+    format: format.combine(
+      format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss.SSS' }),
+      format.errors({ stack: true }),
+      createStructuredFormat()
+    ),
+    defaultMeta: getDefaultMeta(config),
+    transports: [
+      new transports.Console({
+        level: config.level,
+        format: format.combine(
+          format.colorize({
+            colors: customLevels.colors  // ← CAMBIAR ESTO
+          }),
+          format.timestamp({ format: 'HH:mm:ss.SSS' }),
+          createConsoleFormat()
+        )
+      }),
+      new DailyRotateFile({
+        filename: path.join(config.logsDirectory, 'core-services-%DATE%.log'),
+        datePattern: 'YYYY-MM-DD',
+        zippedArchive: true,
+        maxSize: '50m',
+        maxFiles: '14d',
+        level: 'INFO'  // ← CAMBIAR A MAYÚSCULAS
+      }),
+      new DailyRotateFile({
+        filename: path.join(config.logsDirectory, 'core-services-error-%DATE%.log'),
+        datePattern: 'YYYY-MM-DD',
+        zippedArchive: true,
+        maxSize: '25m',
+        maxFiles: '30d',
+        level: 'ERROR'  // ← CAMBIAR A MAYÚSCULAS
+      })
+    ],
+    exceptionHandlers: [
+      new DailyRotateFile({
+        filename: path.join(config.logsDirectory, 'core-services-exceptions-%DATE%.log'),
+        datePattern: 'YYYY-MM-DD',
+        zippedArchive: true,
+        maxSize: '25m',
+        maxFiles: '30d'
+      })
+    ],
+    rejectionHandlers: [
+      new DailyRotateFile({
+        filename: path.join(config.logsDirectory, 'core-services-rejections-%DATE%.log'),
+        datePattern: 'YYYY-MM-DD',
+        zippedArchive: true,
+        maxSize: '25m',
+        maxFiles: '30d'
+      })
+    ],
+    exitOnError: false
+  });
+};
+
+// Create and export the default logger instance
+const winstonLogger = createWinstonLogger();
+const config = createLoggerConfig();
+const logger = new TempEnhancedLogger(winstonLogger, config);
+
+// Log successful initialization
+logger.systemMetrics('🚀 Core-Services logger system initialized', {
+  mode: config.mode,
+  log_level: config.level,
+  environment: config.environment,
+  verbose_enabled: logger.isVerbose(),
+  daily_summary: logger.getDailySummary()
+});
+
+// Export the configured logger as default
+export default logger;
+
+// Export the enhanced logger class for direct instantiation
+export { TempEnhancedLogger as EnhancedCoreServicesLogger };
+// utils/pdfSigner.ts
+import fs from 'fs';
+import { plainAddPlaceholder } from 'node-signpdf';
+
+const { SignPdf } = require('node-signpdf');
+
+interface SignPDFOptions {
+  pdfPath: string;
+  outputPath: string;
+  certPath: string;
+  certPassword?: string;
+  type: 'p12' | 'pem';
+}
+
+export async function signPDF({
+  pdfPath,
+  outputPath,
+  certPath,
+  certPassword = '',
+  type
+}: SignPDFOptions): Promise<void> {
+  
+  // Validate required parameters
+  if (!certPath) {
+    throw new Error('Certificate path is required for PDF signing');
+  }
+
+  const pdfBuffer = fs.readFileSync(pdfPath);
+  const pdfWithPlaceholder = plainAddPlaceholder({
+    pdfBuffer,
+    reason: 'Document signed electronically by CORE'
+  });
+
+  const signer = new SignPdf();
+
+  if (type === 'p12') {
+    const p12Buffer = fs.readFileSync(certPath);
+    
+    const signedPdf = signer.sign(pdfWithPlaceholder, p12Buffer, {
+      passphrase: certPassword,
+      timestampURL: 'http://timestamp.digicert.com'
+    });
+    
+    fs.writeFileSync(outputPath, signedPdf);
+    return;
+  }
+
+  if (type === 'pem') {
+    const certContent = fs.readFileSync(certPath, 'utf8');
+    const certMatch = certContent.match(/-----BEGIN CERTIFICATE-----[^-]+-----END CERTIFICATE-----/s);
+    const keyMatch = certContent.match(/-----BEGIN (?:RSA )?PRIVATE KEY-----[^-]+-----END (?:RSA )?PRIVATE KEY-----/s);
+    
+    if (!certMatch || !keyMatch) {
+      throw new Error('Invalid PEM file: certificate or key not found');
+    }
+    
+    const certificate = Buffer.from(certMatch[0]);
+    const key = Buffer.from(keyMatch[0]);
+    
+    const signedPdf = signer.sign(pdfWithPlaceholder, {
+      key,
+      cert: certificate
+    });
+    
+    fs.writeFileSync(outputPath, signedPdf);
+    return;
+  }
+
+  throw new Error('Unsupported certificate type');
+}
+// utils/windowsGpgFix.ts
+// utils/windowsGpgFix.ts
+import { execSync } from 'child_process';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+
+/**
+ * Fix GPG-agent issues on Windows for SOPS
+ * This addresses the common gpg-agent connection problems on Windows
+ */
+export class WindowsGpgFix {
+  
+  // Updated fingerprint for new GPG key
+  private static readonly REQUIRED_GPG_KEY = 'E0E53EE33278112154BB63B2B02223CF086064AE';
+  
+  /**
+   * Setup GPG environment for Windows
+   */
+  static setupGpgEnvironment(): { gnupgHome: string; env: Record<string, string> } {
+    const gnupgHome = process.env.GNUPGHOME || path.join(os.homedir(), '.gnupg');
+    
+    console.log(`🔧 Setting up GPG environment for Windows...`);
+    console.log(`📁 GNUPG Home: ${gnupgHome}`);
+    
+    // Kill any existing gpg-agent processes
+    try {
+      execSync('taskkill /f /im gpg-agent.exe 2>nul', { stdio: 'pipe' });
+      console.log('🔪 Killed existing gpg-agent processes');
+    } catch {
+      // No existing processes, continue
+    }
+    
+    // Set up Windows-specific environment
+    const env = {
+      ...process.env,
+      GNUPGHOME: gnupgHome,
+      GPG_TTY: 'CON',
+      // Disable problematic keyboxd
+      GPG_AGENT_INFO: '',
+      // Force use of Windows paths
+      PATH: process.env.PATH || ''
+    };
+    
+    return { gnupgHome, env };
+  }
+  
+  /**
+   * Test GPG functionality
+   */
+  static testGpg(): boolean {
+    try {
+      console.log('🧪 Testing GPG functionality...');
+      
+      const { env } = this.setupGpgEnvironment();
+      
+      // Test 1: List secret keys
+      const secretKeys = execSync('gpg --list-secret-keys --with-colons', { 
+        encoding: 'utf8',
+        env,
+        stdio: 'pipe'
+      });
+      
+      // Updated to use new GPG key fingerprint
+      if (!secretKeys.includes(this.REQUIRED_GPG_KEY)) {
+        console.error(`❌ Required GPG key not found: ${this.REQUIRED_GPG_KEY}`);
+        console.log('Available keys:');
+        console.log(secretKeys);
+        return false;
+      }
+      
+      console.log(`✅ GPG key found: ${this.REQUIRED_GPG_KEY}`);
+      
+      // Test 2: Test gpg-agent
+      try {
+        execSync('gpg-connect-agent "GET_VERSION" /bye', { 
+          env,
+          stdio: 'pipe',
+          timeout: 5000
+        });
+        console.log('✅ gpg-agent is working');
+      } catch {
+        console.log('⚠️ gpg-agent connection issue, will try to fix');
+        this.fixGpgAgent(env);
+      }
+      
+      return true;
+      
+    } catch (error) {
+      console.error('❌ GPG test failed:', (error as Error).message);
+      return false;
+    }
+  }
+  
+  /**
+   * Fix gpg-agent issues
+   */
+  private static fixGpgAgent(env: Record<string, string>): void {
+    try {
+      console.log('🔧 Attempting to fix gpg-agent...');
+      
+      // Kill any hanging agents
+      execSync('taskkill /f /im gpg-agent.exe 2>nul', { stdio: 'pipe' });
+      
+      // Start fresh gpg-agent
+      execSync('gpg-agent --daemon --use-standard-socket', { 
+        env,
+        stdio: 'pipe',
+        timeout: 5000
+      });
+      
+      console.log('✅ gpg-agent restarted');
+      
+    } catch (error) {
+      console.warn('⚠️ Could not fix gpg-agent:', (error as Error).message);
+    }
+  }
+  
+  /**
+   * Decrypt SOPS file with Windows-specific approach
+   */
+  static decryptSopsFile(sopsPath: string, secretsPath: string, passphrase: string): string {
+    const { gnupgHome, env } = this.setupGpgEnvironment();
+    
+    console.log('🔐 Attempting SOPS decryption with Windows-optimized approach...');
+    
+    // Method 1: Direct passphrase via stdin
+    try {
+      console.log('🔐 Method 1: Direct passphrase input');
+      
+      const result = execSync(`echo ${passphrase}| "${sopsPath}" -d --output-type json "${secretsPath}"`, {
+        encoding: 'utf8',
+        env: {
+          ...env,
+          GPG_BATCH: '1',
+          GPG_USE_AGENT: '0' // Disable agent for this operation
+        },
+        stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: 30000,
+        shell: 'cmd.exe'
+      });
+      
+      console.log('✅ SOPS decryption successful (Method 1)');
+      return result;
+      
+    } catch (error1) {
+      console.log('⚠️ Method 1 failed, trying Method 2...');
+      
+      // Method 2: Use pinentry-mode loopback
+      try {
+        console.log('🔐 Method 2: Pinentry loopback mode');
+        
+        const result = execSync(`"${sopsPath}" -d --output-type json "${secretsPath}"`, {
+          encoding: 'utf8',
+          env: {
+            ...env,
+            GPG_PASSPHRASE: passphrase,
+            GPG_BATCH: '1'
+          },
+          input: passphrase,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          timeout: 30000
+        });
+        
+        console.log('✅ SOPS decryption successful (Method 2)');
+        return result;
+        
+      } catch (error2) {
+        console.log('⚠️ Method 2 failed, trying Method 3...');
+        
+        // Method 3: Temporary script with passphrase
+        try {
+          console.log('🔐 Method 3: Temporary script approach');
+          
+          const tempScript = path.join(os.tmpdir(), `decrypt-${Date.now()}.cmd`);
+          const scriptContent = `@echo off
+set GNUPGHOME=${gnupgHome}
+set GPG_BATCH=1
+set GPG_USE_AGENT=0
+echo ${passphrase}| "${sopsPath}" -d --output-type json "${secretsPath}"`;
+          
+          fs.writeFileSync(tempScript, scriptContent);
+          
+          const result = execSync(`"${tempScript}"`, {
+            encoding: 'utf8',
+            stdio: ['pipe', 'pipe', 'pipe'],
+            timeout: 30000
+          });
+          
+          // Clean up immediately
+          fs.unlinkSync(tempScript);
+          
+          console.log('✅ SOPS decryption successful (Method 3)');
+          return result;
+          
+        } catch (error3) {
+          // Clean up script if it exists
+          const tempScript = path.join(os.tmpdir(), `decrypt-${Date.now()}.cmd`);
+          if (fs.existsSync(tempScript)) {
+            fs.unlinkSync(tempScript);
+          }
+          
+          console.error('❌ All SOPS decryption methods failed:');
+          console.error('   Method 1 (stdin):', (error1 as Error).message.substring(0, 200));
+          console.error('   Method 2 (loopback):', (error2 as Error).message.substring(0, 200));
+          console.error('   Method 3 (script):', (error3 as Error).message.substring(0, 200));
+          
+          throw new Error('SOPS decryption failed with all methods. Check GPG setup and passphrase.');
+        }
+      }
+    }
+  }
+}
+
+// Export helper function for envConfig.ts
+export function decryptSopsWithWindowsFix(sopsPath: string, secretsPath: string, passphrase: string): string {
+  // Setup GPG environment first
+  if (!WindowsGpgFix.testGpg()) {
+    throw new Error('GPG environment is not properly set up');
+  }
+  
+  // Decrypt using Windows-optimized methods
+  return WindowsGpgFix.decryptSopsFile(sopsPath, secretsPath, passphrase);
+}
+// validators/iso27001EmailSchema.ts
+// src/validators/iso27001EmailSchema.ts
+
+import { z } from 'zod';
+
+/**
+ * ISO 27001 Compliant Email Request Schema
+ * 
+ * This schema validates email requests according to ISO 27001 standards:
+ * - A.8.2.1: Information classification validation
+ * - A.13.2.1: Information transfer format validation
+ * - A.9.4.1: Information access restriction validation
+ */
+
+// ISO 27001 Annex A.8.2 - Information Classification Levels
+const ISO27001ClassificationSchema = z.enum(['internal', 'confidential', 'restricted'], {
+  errorMap: () => ({ 
+    message: 'Classification must be one of: internal, confidential, restricted (ISO 27001 A.8.2.1)' 
+  })
+});
+
+// Email attachment schema with file path validation
+const EmailAttachmentSchema = z.object({
+  name: z.string()
+    .min(1, 'Attachment name is required')
+    .max(255, 'Attachment name too long')
+    .regex(/^[^<>:"/\\|?*]+$/, 'Invalid characters in attachment name'),
+  path: z.string()
+    .min(1, 'Attachment path is required')
+    .max(500, 'Attachment path too long')
+});
+
+// Main ISO 27001 compliant email schema
+export const ISO27001EmailRequestSchema = z.object({
+  // Core email fields (A.13.2.1 - Information transfer)
+  to: z.string()
+    .email('Invalid email address format')
+    .max(320, 'Email address too long'), // RFC 5321 limit
+  
+  subject: z.string()
+    .min(1, 'Subject is required')
+    .max(500, 'Subject too long'),
+  
+  body: z.string()
+    .min(1, 'Email body is required')
+    .max(50000, 'Email body too long'), // Reasonable limit for email content
+  
+  // Optional sender override
+  from: z.string()
+    .email('Invalid sender email address format')
+    .max(320, 'Sender email address too long')
+    .optional(),
+  
+  // Attachments with validation
+  attachments: z.array(EmailAttachmentSchema)
+    .max(10, 'Too many attachments (maximum 10)')
+    .optional(),
+  
+  // ISO 27001 A.8.2.1 - Information classification (REQUIRED)
+  classification: ISO27001ClassificationSchema,
+  
+  // Optional email priority
+  importance: z.enum(['low', 'normal', 'high'])
+    .default('normal'),
+  
+  // GDPR consent token (can be in header or body)
+  gdpr_token: z.string()
+    .min(1, 'GDPR token is required for compliance')
+    .max(100, 'GDPR token too long')
+    .optional() // Optional in body since it can come from headers
+});
+
+// Type inference for TypeScript
+export type ISO27001EmailRequest = z.infer<typeof ISO27001EmailRequestSchema>;
+
+/**
+ * Validates email request against ISO 27001 compliance standards
+ * 
+ * @param payload - Email request payload to validate
+ * @returns Validation result with detailed error information
+ */
+export const validateISO27001EmailRequest = (payload: unknown) => {
+  return ISO27001EmailRequestSchema.safeParse(payload);
+};
+
+/**
+ * Middleware function for Express routes to validate ISO 27001 email requests
+ * 
+ * @param req - Express request object
+ * @param res - Express response object  
+ * @param next - Express next function
+ */
+export const validateISO27001EmailMiddleware = (req: any, res: any, next: any) => {
+  const result = validateISO27001EmailRequest(req.body);
+  
+  if (!result.success) {
+    return res.status(400).json({
+      error: 'ISO 27001 validation failed',
+      details: result.error.issues,
+      iso_control: 'A.8.2.1' // Information classification
+    });
+  }
+  
+  // Attach validated data to request
+  req.validatedBody = result.data;
+  next();
+};
+// validators/pdfRequestSchema.ts
+import { z } from 'zod';
+
+// Define the structure of core_report_info
+export const coreReportInfoSchema = z.object({
+  report_name: z.string().min(1),
+  report_description: z.string().min(1),
+  report_template: z.string().min(1),
+  report_version: z.string().regex(/^\d+\.\d+\.\d+$/),
+  report_file_name: z.string().min(1),
+  report_out_mode: z.enum(['file', 'print']),
+  barcode: z.string().optional() // ✅ este es el cambio
+});
+
+// Main PDF request schema
+export const pdfRequestSchema = z.object({
+  core_report_info: coreReportInfoSchema
+}).passthrough(); // allow additional properties
+
+// validators/zplRequestSchema.ts
+import { z } from 'zod';
+
+// Define the structure of core_report_info
+export const coreReportInfoSchema = z.object({
+  report_name: z.string().min(1),
+  report_description: z.string().min(1),
+  report_template: z.string().min(1),
+  report_version: z.string().regex(/^\d+\.\d+\.\d+$/),
+  //report_file_name: z.string().min(1),
+  //report_out_mode: z.enum(['file', 'print']),
+  //barcode: z.string().optional() // ✅ este es el cambio
+});
+
+// Main ZPL request schema
+export const zplRequestSchema = z.object({
+  core_report_info: coreReportInfoSchema
+}).passthrough(); // allow additional properties
+
+
+
