@@ -3,10 +3,12 @@ import puppeteer, { Browser, Page } from 'puppeteer';
 import fs from 'fs';
 import os from 'os';
 import logger from '../utils/logging';
+import { BrowserPoolConfig  } from '../services/serviceContainer'; // O como obtengas el contenedor de servicios
 
-const MAX_BROWSERS = parseInt(process.env.MAX_BROWSERS || '4');
-const MAX_PAGES_PER_BROWSER = parseInt(process.env.MAX_PAGES_PER_BROWSER || '10');
-const PAGE_IDLE_TIMEOUT = parseInt(process.env.PAGE_IDLE_TIMEOUT || '300000'); // 5 min
+// vars to config del container
+let MAX_BROWSERS: number;
+let MAX_PAGES_PER_BROWSER: number;
+let PAGE_IDLE_TIMEOUT: number;
 
 interface PageInfo {
   page: Page;
@@ -27,14 +29,22 @@ function getExecutablePath(): string | undefined {
   return undefined;
 }
 
-export async function initializeBrowserPool() {
+export async function initializeBrowserPool(config?: BrowserPoolConfig) {
+
+  // Load configuration from environment variables or provided config
+  MAX_BROWSERS = config?.maxBrowsers || parseInt(process.env.MAX_BROWSERS || '2');
+  MAX_PAGES_PER_BROWSER = config?.maxPagesPerBrowser || parseInt(process.env.MAX_PAGES_PER_BROWSER || '3');
+  PAGE_IDLE_TIMEOUT = config?.pageIdleTimeout || parseInt(process.env.PAGE_IDLE_TIMEOUT || '300000');
+  
   logger.system('Initializing browser pool', {
     max_browsers: MAX_BROWSERS,
     max_pages_per_browser: MAX_PAGES_PER_BROWSER,
     page_idle_timeout_ms: PAGE_IDLE_TIMEOUT
   });
 
+  // validate configuration
   for (let i = 0; i < MAX_BROWSERS; i++) {
+    
     try {
       const browser = await puppeteer.launch({
         headless: 'new',
@@ -65,7 +75,7 @@ export async function initializeBrowserPool() {
     }
   }
   
-  // Iniciar cleanup de páginas idle
+  // Cleanup idle pages periodically
   startPageCleanup();
   
   logger.system('Browser pool initialization completed', {
@@ -77,7 +87,7 @@ export async function initializeBrowserPool() {
 export async function acquirePage(): Promise<Page> {
   const startTime = Date.now();
   
-  // 1. Intentar usar página disponible
+  //Try to acquire a page from the pool
   if (availablePages.length > 0) {
     const pageInfo = availablePages.pop()!;
     pageInfo.lastUsed = Date.now();
@@ -91,7 +101,7 @@ export async function acquirePage(): Promise<Page> {
     return pageInfo.page;
   }
 
-  // 2. Crear nueva página si no hemos alcanzado el límite
+  // Create a new page if we have not reached the maximum limit
   const totalPages = getTotalActivePages();
   const maxTotalPages = MAX_BROWSERS * MAX_PAGES_PER_BROWSER;
   
@@ -99,7 +109,7 @@ export async function acquirePage(): Promise<Page> {
     const browser = getLeastLoadedBrowser();
     const page = await browser.newPage();
     
-    // Configurar timeouts para evitar páginas colgadas
+    // Setup default timeouts
     page.setDefaultTimeout(30000);
     page.setDefaultNavigationTimeout(30000);
     
@@ -113,14 +123,14 @@ export async function acquirePage(): Promise<Page> {
     return page;
   }
 
-  // 3. Si llegamos al límite, esperar por una página disponible
+  // if we reach here, it means we have no available pages and reached the max limit
   logger.warn('Page pool exhausted, waiting for available page', {
     total_active_pages: totalPages,
     max_pages: maxTotalPages,
     available_pages: availablePages.length
   });
   
-  // Esperar hasta 30 segundos por una página disponible
+  //wait for an available page
   const maxWaitTime = 30000;
   const pollInterval = 100;
   let waitTime = 0;
@@ -143,7 +153,7 @@ export async function acquirePage(): Promise<Page> {
     waitTime += pollInterval;
   }
   
-  // 4. Si no hay páginas disponibles después de esperar, forzar creación
+  // if there are still no available pages after waiting, create a new one
   logger.error('Page pool timeout, forcing new page creation', {
     wait_time_ms: waitTime,
     total_active_pages: getTotalActivePages()
@@ -161,22 +171,22 @@ export async function releasePage(page: Page) {
   const startTime = Date.now();
   
   try {
-    // Limpiar la página
+    // Clean up the page before releasing it
     await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 });
     
-    // Limpiar cookies y storage
+    // CLean up cookies
     await page.evaluate(() => {
-      // Limpiar localStorage y sessionStorage
+      // Clean up session storage
       if (typeof Storage !== 'undefined') {
         localStorage.clear();
         sessionStorage.clear();
       }
     });
     
-    // Encontrar el browser de esta página
+    // Find the browser instance for this page
     const browser = page.browser();
     
-    // Agregar a pool disponible si no excedemos el límite
+    // Add a new entry to the available pages pool
     if (availablePages.length < MAX_PAGES_PER_BROWSER * MAX_BROWSERS) {
       availablePages.push({
         page,
@@ -190,7 +200,7 @@ export async function releasePage(page: Page) {
         status: 'pooled'
       });
     } else {
-      // Si tenemos demasiadas páginas, cerrar esta
+      // If we have reached the maximum number of pages, close the page
       await page.close();
       
       logger.pdf('Page closed (pool full)', {
@@ -201,7 +211,7 @@ export async function releasePage(page: Page) {
     }
     
   } catch (error) {
-    // Si falla la limpieza, cerrar la página
+    // if cleanup fails, log the error and close the page
     try {
       await page.close();
       logger.warn('Page cleanup failed, page closed', {
@@ -229,7 +239,7 @@ function getLeastLoadedBrowser(): Browser {
     throw new Error('No browsers available in pool');
   }
   
-  // Por simplicidad, rotar browsers de manera round-robin
+  // rotate through browsers to balance load
   return browsers[Math.floor(Math.random() * browsers.length)];
 }
 

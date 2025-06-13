@@ -1,4 +1,5 @@
 // src/app.ts
+// src/app.ts - FIXED: Dynamic host configuration
 import express from "express";
 import helmet from "helmet";
 import { getConfigAsync } from "./config/envConfig";
@@ -16,37 +17,55 @@ import { initGDPRService } from "./services/gdpr/gdprTokenService";
 
 const startApp = async () => {
   const config = await getConfigAsync();
-  console.log("🚀 Config loaded!");
+  logger.system("Config loaded successfully", {
+    config_source: config.config_source || 'unknown',
+    has_required_fields: !!(config.clientId && config.senderEmail && config.jwtSecret)
+  });
 
   validateConfig(config);
-  console.log("✅ Config validated!");
+  logger.system("Config validation passed", {
+    validated_fields: ['clientId', 'clientSecret', 'tenantId', 'senderEmail'],
+    config_mode: config.config_source
+  });
 
   await initServiceContainer(config);
-  console.log("🏗️ Service container initialized");
+  logger.container("Service container initialized successfully", {
+    email_config: !!config.senderEmail,
+    pdf_config: !!config.certPdfSignPath,
+    jwt_config: !!config.jwtSecret
+  });
 
-  // Después de initServiceContainer:
+  // After initServiceContainer:
   initGDPRService();
-  console.log("🔐 GDPR service initialized");
+  logger.system("GDPR service initialized", {
+    default_token_expiry: '24 hours',
+    cleanup_interval: '1 hour'
+  });
 
   logger.startMetrics(30000); // Start metrics collection every 30 seconds
-  console.log("📊 Metrics collection started");
+  logger.system("Metrics collection started", {
+    interval_ms: 30000,
+    metrics_file: 'core-services-metrics-*.log'
+  });
 
   // Create JWT middleware with loaded config
   const authenticateJWT = createAuthenticateJWT(config.jwtSecret);
-  console.log("🔐 JWT middleware created");
+  logger.auth("JWT middleware created", {
+    jwt_secret_length: config.jwtSecret?.length || 0
+  });
 
   const app = express();
   app.use(helmet());
   app.use(express.json());
 
-  // Auth routes - para poder hacer login
+  // Auth routes - for login capability
   app.use("/auth", authRoutes);
 
-  // EMAIL ROUTES - ¡EL MOMENTO DE LA VERDAD!
+  // EMAIL ROUTES - TESTING MODE (authentication disabled)
   app.use("/api/email", /*authenticateJWT, authorizeAdmin,*/ emailPublicRoutes);
   app.use("/api/gdpr", gdprRoutes);
 
-  // Public routes for pdf and zpl services
+  // Public routes for pdf and zpl services - TESTING MODE (authentication disabled)
   app.use("/generate-pdf", /*authenticateJWT, authorizeAdmin,*/ pdfRoutes);
   app.use("/generate-zpl", /*authenticateJWT, authorizeAdmin,*/ zplRoutes);
 
@@ -54,28 +73,104 @@ const startApp = async () => {
     res.status(200).send("OK");
   });
 
-  console.log("📝 About to start express server...");
+  logger.system("Express server configuration completed", {
+    routes: ['/auth', '/api/email', '/api/gdpr', '/generate-pdf', '/generate-zpl', '/health'],
+    middleware: ['helmet', 'express.json'],
+    authentication: 'DISABLED_FOR_TESTING'
+  });
 
+  // FIXED: Dynamic host and port configuration
   const PORT = config.servicesPort || 3001;
-  app.listen(PORT, () => {
-    console.log(`[core-services] API listening on port ${PORT}`);
-    console.log("[core-services] 🚀 FULL EMAIL FUNCTIONALITY");
-    console.log("[core-services] Ready for ISO 27001 compliant emails!");
+  const HOST = process.env.HOST || '0.0.0.0'; // Default to listen on all interfaces
+  
+  // Build dynamic base URL for API endpoints
+  const getBaseUrl = () => {
+    // Priority: explicit config > environment > fallback
+    if (config.coreApiHost) {
+      return config.coreApiHost;
+    }
+    
+    if (process.env.API_BASE_URL) {
+      return process.env.API_BASE_URL;
+    }
+    
+    // Fallback for development
+    const protocol = process.env.NODE_ENV === 'production' ? 'https' : 'http';
+    const hostname = process.env.HOSTNAME || 'localhost';
+    return `${protocol}://${hostname}`;
+  };
+
+  const baseUrl = getBaseUrl();
+  const fullApiUrl = `${baseUrl}:${PORT}`;
+
+  app.listen(PORT, HOST, () => {
+    logger.system(`Core Services API started successfully`, {
+      host: HOST,
+      port: PORT,
+      base_url: baseUrl,
+      full_api_url: fullApiUrl,
+      listen_address: `${HOST}:${PORT}`,
+      api_endpoints: {
+        health: `${fullApiUrl}/health`,
+        auth: `${fullApiUrl}/auth/login`,
+        email: `${fullApiUrl}/api/email/send-with-consent`,
+        pdf: `${fullApiUrl}/generate-pdf`,
+        zpl: `${fullApiUrl}/generate-zpl`,
+        gdpr: `${fullApiUrl}/api/gdpr/generate-token`
+      },
+      configuration: {
+        environment: process.env.NODE_ENV || 'development',
+        config_source: config.config_source,
+        api_host_from: config.coreApiHost ? 'config' : 
+                      process.env.API_BASE_URL ? 'env_API_BASE_URL' : 
+                      'fallback'
+      },
+      features: [
+        'ISO 27001 compliant emails',
+        'PDF generation with signing',
+        'ZPL label generation',
+        'GDPR consent management'
+      ],
+      ready: true
+    });
   });
 };
 
-console.log("🔄 Listen called, waiting for server...");
+logger.system("Starting Core Services application", {
+  node_version: process.version,
+  platform: process.platform,
+  environment: process.env.NODE_ENV || 'development',
+  hostname: process.env.HOSTNAME || 'localhost',
+  host_binding: process.env.HOST || '0.0.0.0'
+});
 
-startApp().catch(console.error);
-
+startApp().catch(error => {
+  logger.error("Failed to start Core Services application", {
+    error: error.message,
+    stack: error.stack
+  });
+  process.exit(1);
+});
+// src/config/browserPool.ts
 // src/config/browserPool.ts
 import puppeteer, { Browser, Page } from 'puppeteer';
 import fs from 'fs';
 import os from 'os';
+import logger from '../utils/logging';
 
-const MAX_BROWSERS = 4;
+const MAX_BROWSERS = parseInt(process.env.MAX_BROWSERS || '4');
+const MAX_PAGES_PER_BROWSER = parseInt(process.env.MAX_PAGES_PER_BROWSER || '10');
+const PAGE_IDLE_TIMEOUT = parseInt(process.env.PAGE_IDLE_TIMEOUT || '300000'); // 5 min
+
+interface PageInfo {
+  page: Page;
+  lastUsed: number;
+  browser: Browser;
+}
+
 const browsers: Browser[] = [];
-const availablePages: Page[] = [];
+const availablePages: PageInfo[] = [];
+let cleanupInterval: NodeJS.Timeout | null = null;
 
 function getExecutablePath(): string | undefined {
   const platform = os.platform();
@@ -87,44 +182,316 @@ function getExecutablePath(): string | undefined {
 }
 
 export async function initializeBrowserPool() {
+  logger.system('Initializing browser pool', {
+    max_browsers: MAX_BROWSERS,
+    max_pages_per_browser: MAX_PAGES_PER_BROWSER,
+    page_idle_timeout_ms: PAGE_IDLE_TIMEOUT
+  });
+
   for (let i = 0; i < MAX_BROWSERS; i++) {
-    const browser = await puppeteer.launch({
-      headless: 'new',
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-      executablePath: getExecutablePath(),
-    });
-    browsers.push(browser);
-    // No creamos páginas aún. Las pediremos dinámicamente.
+    try {
+      const browser = await puppeteer.launch({
+        headless: 'new',
+        args: [
+          '--no-sandbox', 
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage', // Evita problemas de memoria compartida
+          '--disable-gpu',
+          '--no-first-run',
+          '--no-default-browser-check',
+          '--disable-default-apps'
+        ],
+        executablePath: getExecutablePath(),
+      });
+      
+      browsers.push(browser);
+      
+      logger.system(`Browser ${i + 1} initialized`, {
+        browser_index: i,
+        total_browsers: browsers.length
+      });
+    } catch (error) {
+      logger.error(`Failed to initialize browser ${i + 1}`, {
+        browser_index: i,
+        error: (error as Error).message
+      });
+      throw error;
+    }
   }
-  console.log(`[core-services] Browser pool initialized with ${MAX_BROWSERS} browsers.`);
+  
+  // Iniciar cleanup de páginas idle
+  startPageCleanup();
+  
+  logger.system('Browser pool initialization completed', {
+    browsers_created: browsers.length,
+    cleanup_interval_ms: 60000
+  });
 }
 
 export async function acquirePage(): Promise<Page> {
+  const startTime = Date.now();
+  
+  // 1. Intentar usar página disponible
   if (availablePages.length > 0) {
-    return availablePages.pop()!;
+    const pageInfo = availablePages.pop()!;
+    pageInfo.lastUsed = Date.now();
+    
+    logger.pdf('Page acquired from pool', {
+      duration_ms: Date.now() - startTime,
+      pages_remaining: availablePages.length,
+      source: 'pool'
+    });
+    
+    return pageInfo.page;
   }
 
-  // Si no hay páginas, crea una nueva en el primer browser disponible
-  const browser = browsers[Math.floor(Math.random() * browsers.length)];
-  return await browser.newPage();
+  // 2. Crear nueva página si no hemos alcanzado el límite
+  const totalPages = getTotalActivePages();
+  const maxTotalPages = MAX_BROWSERS * MAX_PAGES_PER_BROWSER;
+  
+  if (totalPages < maxTotalPages) {
+    const browser = getLeastLoadedBrowser();
+    const page = await browser.newPage();
+    
+    // Configurar timeouts para evitar páginas colgadas
+    page.setDefaultTimeout(30000);
+    page.setDefaultNavigationTimeout(30000);
+    
+    logger.pdf('New page created', {
+      duration_ms: Date.now() - startTime,
+      total_active_pages: totalPages + 1,
+      max_pages: maxTotalPages,
+      source: 'new'
+    });
+    
+    return page;
+  }
+
+  // 3. Si llegamos al límite, esperar por una página disponible
+  logger.warn('Page pool exhausted, waiting for available page', {
+    total_active_pages: totalPages,
+    max_pages: maxTotalPages,
+    available_pages: availablePages.length
+  });
+  
+  // Esperar hasta 30 segundos por una página disponible
+  const maxWaitTime = 30000;
+  const pollInterval = 100;
+  let waitTime = 0;
+  
+  while (waitTime < maxWaitTime) {
+    if (availablePages.length > 0) {
+      const pageInfo = availablePages.pop()!;
+      pageInfo.lastUsed = Date.now();
+      
+      logger.pdf('Page acquired after waiting', {
+        duration_ms: Date.now() - startTime,
+        wait_time_ms: waitTime,
+        source: 'pool_after_wait'
+      });
+      
+      return pageInfo.page;
+    }
+    
+    await new Promise(resolve => setTimeout(resolve, pollInterval));
+    waitTime += pollInterval;
+  }
+  
+  // 4. Si no hay páginas disponibles después de esperar, forzar creación
+  logger.error('Page pool timeout, forcing new page creation', {
+    wait_time_ms: waitTime,
+    total_active_pages: getTotalActivePages()
+  });
+  
+  const browser = getLeastLoadedBrowser();
+  const page = await browser.newPage();
+  page.setDefaultTimeout(30000);
+  page.setDefaultNavigationTimeout(30000);
+  
+  return page;
 }
 
 export async function releasePage(page: Page) {
+  const startTime = Date.now();
+  
   try {
-    await page.goto('about:blank'); // Limpia el contenido
-    availablePages.push(page);
-  } catch {
-    // Si falla, se destruye y no se guarda
-    await page.close();
+    // Limpiar la página
+    await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 });
+    
+    // Limpiar cookies y storage
+    await page.evaluate(() => {
+      // Limpiar localStorage y sessionStorage
+      if (typeof Storage !== 'undefined') {
+        localStorage.clear();
+        sessionStorage.clear();
+      }
+    });
+    
+    // Encontrar el browser de esta página
+    const browser = page.browser();
+    
+    // Agregar a pool disponible si no excedemos el límite
+    if (availablePages.length < MAX_PAGES_PER_BROWSER * MAX_BROWSERS) {
+      availablePages.push({
+        page,
+        lastUsed: Date.now(),
+        browser
+      });
+      
+      logger.pdf('Page released to pool', {
+        duration_ms: Date.now() - startTime,
+        available_pages: availablePages.length,
+        status: 'pooled'
+      });
+    } else {
+      // Si tenemos demasiadas páginas, cerrar esta
+      await page.close();
+      
+      logger.pdf('Page closed (pool full)', {
+        duration_ms: Date.now() - startTime,
+        available_pages: availablePages.length,
+        status: 'closed'
+      });
+    }
+    
+  } catch (error) {
+    // Si falla la limpieza, cerrar la página
+    try {
+      await page.close();
+      logger.warn('Page cleanup failed, page closed', {
+        duration_ms: Date.now() - startTime,
+        error: (error as Error).message,
+        status: 'closed_after_error'
+      });
+    } catch (closeError) {
+      logger.error('Failed to close page after cleanup error', {
+        duration_ms: Date.now() - startTime,
+        cleanup_error: (error as Error).message,
+        close_error: (closeError as Error).message
+      });
+    }
   }
+}
+
+/**
+ * Get the least loaded browser from the pool
+ * This is a simple round-robin selection for now.
+ * In the future, we could implement a more sophisticated load balancing strategy.
+ */
+function getLeastLoadedBrowser(): Browser {
+  if (browsers.length === 0) {
+    throw new Error('No browsers available in pool');
+  }
+  
+  // Por simplicidad, rotar browsers de manera round-robin
+  return browsers[Math.floor(Math.random() * browsers.length)];
+}
+
+/**
+ * Count total active pages in the pool
+ */
+function getTotalActivePages(): number {
+  // this is a simple count of all pages in the availablePages array
+  return availablePages.length;
+}
+
+/**
+ * Cleanup idle pages periodically
+ */
+function startPageCleanup() {
+  if (cleanupInterval) return;
+  
+  cleanupInterval = setInterval(async () => {
+    const now = Date.now();
+    const pagesToClose: PageInfo[] = [];
+    const pagesToKeep: PageInfo[] = [];
+    
+    // Separate pages into those to close and those to keep
+    for (const pageInfo of availablePages) {
+      if (now - pageInfo.lastUsed > PAGE_IDLE_TIMEOUT) {
+        pagesToClose.push(pageInfo);
+      } else {
+        pagesToKeep.push(pageInfo);
+      }
+    }
+    
+    // Cerrar páginas idle
+    if (pagesToClose.length > 0) {
+      logger.system('Cleaning up idle pages', {
+        pages_to_close: pagesToClose.length,
+        pages_to_keep: pagesToKeep.length,
+        idle_timeout_ms: PAGE_IDLE_TIMEOUT
+      });
+      
+      for (const pageInfo of pagesToClose) {
+        try {
+          await pageInfo.page.close();
+        } catch (error) {
+          logger.warn('Failed to close idle page', {
+            error: (error as Error).message
+          });
+        }
+      }
+      
+      // Update availablePages array
+      availablePages.length = 0;
+      availablePages.push(...pagesToKeep);
+    }
+    
+  }, 60000); // Cleanup every 60 seconds
 }
 
 export async function closeAllBrowsers() {
-  for (const browser of browsers) {
-    await browser.close();
+  logger.system('Closing all browsers', {
+    browsers_count: browsers.length,
+    available_pages: availablePages.length
+  });
+  
+  // Stop the cleanup interval if it's running
+  if (cleanupInterval) {
+    clearInterval(cleanupInterval);
+    cleanupInterval = null;
   }
+  
+  // CLose all available pages
+  for (const pageInfo of availablePages) {
+    try {
+      await pageInfo.page.close();
+    } catch (error) {
+      logger.warn('Failed to close page during shutdown', {
+        error: (error as Error).message
+      });
+    }
+  }
+  availablePages.length = 0;
+  
+  // CLose all browsers
+  for (const browser of browsers) {
+    try {
+      await browser.close();
+    } catch (error) {
+      logger.warn('Failed to close browser during shutdown', {
+        error: (error as Error).message
+      });
+    }
+  }
+  browsers.length = 0;
+  
+  logger.system('All browsers closed successfully');
 }
 
+/**
+ * Get statistics about the browser pool
+ */
+export function getBrowserPoolStats() {
+  return {
+    browsers: browsers.length,
+    availablePages: availablePages.length,
+    maxBrowsers: MAX_BROWSERS,
+    maxPagesPerBrowser: MAX_PAGES_PER_BROWSER,
+    pageIdleTimeout: PAGE_IDLE_TIMEOUT
+  };
+}
 // src/config/config-validator.ts
 import logger from '../utils/logging';
 
@@ -162,7 +529,6 @@ export function validateConfig(config: any): void {
       operation: 'SYSTEM',
       error_code: 'CONFIG_NULL'
     });
-    console.error("❌ Configuration is null or undefined");
     process.exit(1);
   }
 
@@ -179,8 +545,6 @@ export function validateConfig(config: any): void {
       total_required: requiredVars.length
     });
     
-    console.error("❌ Missing required environment variables:");
-    missing.forEach(({ label }) => console.error(`  - ${label}`));
     process.exit(1);
   }
 
@@ -196,8 +560,6 @@ export function validateConfig(config: any): void {
       tenant_id: config.tenantId
     })
   });
-
-  console.log("✅ All required environment variables are present.");
 }
 // src/config/envConfig.ts
 // config/envConfig.ts - SIMPLIFIED VERSION - SOPS ONLY
@@ -205,6 +567,7 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import yaml from 'js-yaml';
+import logger from "../utils/logging";
 
 /**
  * SIMPLIFIED CONFIG LOADER - SOPS ONLY
@@ -221,16 +584,16 @@ const getClientId = (): string => {
   const cliClientId = cliArgs.find(arg => !arg.startsWith('--'));
   
   if (cliClientId) {
-    console.log(`🎯 Using CLIENT_ID: ${cliClientId}`);
+    logger.system(`Using CLIENT_ID from CLI: ${cliClientId}`);
     return cliClientId;
   }
   
   if (process.env.CLIENT_ID) {
-    console.log(`🎯 Using CLIENT_ID from ENV: ${process.env.CLIENT_ID}`);
+    logger.system(`Using CLIENT_ID from ENV: ${process.env.CLIENT_ID}`);
     return process.env.CLIENT_ID;
   }
   
-  console.log(`🎯 Using default CLIENT_ID: core-dev`);
+  logger.system(`Using default CLIENT_ID: core-dev`);
   return 'core-dev';
 };
 
@@ -239,13 +602,13 @@ const getClientId = (): string => {
  */
 const getGPGPassphrase = (): string => {
   if (process.env.GPG_PASSPHRASE) {
-    console.log('🔑 Using GPG passphrase from environment');
+    logger.system('Using GPG passphrase from environment');
     return process.env.GPG_PASSPHRASE;
   }
   
   const passphraseArg = process.argv.find(arg => arg.startsWith('--gpg-passphrase='));
   if (passphraseArg) {
-    console.log('🔑 Using GPG passphrase from CLI argument');
+    logger.system('Using GPG passphrase from CLI argument');
     return passphraseArg.split('=')[1];
   }
   
@@ -267,15 +630,23 @@ const getSopsPath = (envsRepoPath: string): string => {
  * Decrypt SOPS file using spawn for better process control
  */
 const decryptSopsAsync = async (sopsPath: string, secretsPath: string, gpgPassphrase: string): Promise<string> => {
-  console.log('🔐 Decrypting SOPS file...');
+  logger.system('🔐 Decrypting SOPS file...');
   
   return new Promise((resolve, reject) => {
     const gnupgHome = process.env.GNUPGHOME || path.join(process.env.APPDATA!, 'gnupg');
     
-    console.log('🔍 SOPS Environment:');
-    console.log('  SOPS Path:', sopsPath);
-    console.log('  Secrets Path:', secretsPath);
-    console.log('  GNUPGHOME:', gnupgHome);
+    logger.debug('SOPS Environment details', {
+      sops_path: sopsPath,
+      secrets_path: secretsPath,
+      gnupg_home: gnupgHome,
+      ...(logger.isVerbose() && {
+        verbose_full_env: {
+          GNUPGHOME: gnupgHome,
+          GPG_TTY: process.platform === 'win32' ? undefined : '/dev/null',
+          GPG_BATCH: '1'
+        }
+      })
+    });
     
     const sopsProcess = spawn(sopsPath, [
       '-d', 
@@ -308,17 +679,21 @@ const decryptSopsAsync = async (sopsPath: string, secretsPath: string, gpgPassph
 
     sopsProcess.on('close', (code) => {
       if (code === 0) {
-        console.log('✅ SOPS decryption successful');
+        logger.system('SOPS decryption successful');
         resolve(stdout);
       } else {
-        console.log('❌ SOPS decryption failed with code:', code);
-        console.log('❌ STDERR:', stderr);
+        logger.error('SOPS decryption failed', {
+          exit_code: code,
+          stderr: stderr
+        });
         reject(new Error(`SOPS decryption failed: ${stderr}`));
       }
     });
 
     sopsProcess.on('error', (error) => {
-      console.log('❌ SOPS process error:', error.message);
+      logger.error('SOPS process error', {
+        error: error.message
+      });
       reject(error);
     });
   });
@@ -2716,12 +3091,12 @@ export function getCentralLoggingUrl(): string | null {
   return null;
 }
 // src/services/pdf/generate.ts
+// src/services/pdf/generate.ts - VERSIÓN MEJORADA
 import path from "path";
 import { promises as fs } from "fs";
 import { compileFile } from "pug";
 import { paths } from "../../config/paths";
 import { acquirePage, releasePage } from "../../config/browserPool";
-import { sendLog } from "../../services/logEmitter";
 import { v4 as uuidv4 } from "uuid";
 import logger from "../../utils/logging";
 
@@ -2734,10 +3109,38 @@ interface CoreReportInfo {
   report_out_mode: string;
 }
 
+/**
+ * Estructura de error mejorada para PDF generation
+ */
+class PDFGenerationError extends Error {
+  public readonly code: string;
+  public readonly details: string;
+  public readonly userAction: string;
+  public readonly statusCode: number;
+  public readonly traceId: string;
+
+  constructor(
+    message: string,
+    code: string,
+    details: string,
+    userAction: string,
+    statusCode: number = 500,
+    traceId: string
+  ) {
+    super(message);
+    this.name = 'PDFGenerationError';
+    this.code = code;
+    this.details = details;
+    this.userAction = userAction;
+    this.statusCode = statusCode;
+    this.traceId = traceId;
+  }
+}
+
 export async function generatePDF(data: any): Promise<Buffer> {
   const startTime = Date.now();
   const info: CoreReportInfo = data.core_report_info;
-  const trace_id = uuidv4(); // Generate a unique trace ID for this request
+  const trace_id = uuidv4();
   
   logger.pdf('Starting PDF generation', {
     trace_id,
@@ -2748,15 +3151,21 @@ export async function generatePDF(data: any): Promise<Buffer> {
     report_file_name: info?.report_file_name
   });
 
-  if (!info || !info.report_template) {
-    logger.pdf('PDF generation failed - missing template info', {
-      trace_id,
-      duration_ms: Date.now() - startTime,
-      error_code: 'MISSING_TEMPLATE_INFO',
-      has_core_report_info: !!info,
-      has_report_template: !!info?.report_template
-    });
-    throw new Error("Missing core_report_info or report_template");
+  // VALIDACIÓN MEJORADA
+  try {
+    validatePDFRequest(info, trace_id);
+  } catch (error) {
+    if (error instanceof PDFGenerationError) {
+      throw error;
+    }
+    throw new PDFGenerationError(
+      'PDF request validation failed',
+      'VALIDATION_ERROR',
+      (error as Error).message,
+      'Check your request format and ensure all required fields are provided',
+      400,
+      trace_id
+    );
   }
 
   const templatePath = path.join(paths.pdf.templatePath, `${info.report_template}.pug`);
@@ -2765,49 +3174,47 @@ export async function generatePDF(data: any): Promise<Buffer> {
   let page: any = null;
   
   try {
-    logger.pdf('Loading template and CSS', {
+    // PASO 1: Verificar archivos de template
+    logger.pdf('Verifying template files', {
       trace_id,
       template_path: templatePath,
       css_path: cssPath
     });
 
-    const cssContent = await fs.readFile(cssPath, "utf-8");
-    const compile = compileFile(templatePath);
-    const html = compile({
-      ...data,
-      embeddedCSS: `<style>${cssContent}</style>`,
+    await validateTemplateFiles(templatePath, cssPath, trace_id);
+
+    // PASO 2: Leer y compilar template
+    logger.pdf('Loading and compiling template', {
+      trace_id,
+      template_path: templatePath
     });
 
-    logger.pdf('Template compiled, acquiring browser page', {
+    const [cssContent, htmlContent] = await compileTemplate(templatePath, cssPath, data, trace_id);
+
+    // PASO 3: Adquirir página del browser pool
+    logger.pdf('Acquiring browser page from pool', {
       trace_id,
-      html_length: html.length,
+      html_length: htmlContent.length,
       duration_ms: Date.now() - startTime
     });
 
-    page = await acquirePage();
+    page = await acquirePageSafely(trace_id);
     
-    logger.pdf('Browser page acquired, rendering PDF', {
+    // PASO 4: Generar PDF
+    logger.pdf('Rendering PDF content', {
       trace_id,
       duration_ms: Date.now() - startTime
     });
 
-    await page.setContent(html, { waitUntil: "domcontentloaded" });
+    const pdfBuffer = await renderPDF(page, htmlContent, trace_id);
     
-    const pdfGenerationStart = Date.now();
-    const pdfBuffer = await page.pdf({
-      format: "A4",
-      printBackground: true,
-    });
-    const pdfGenerationTime = Date.now() - pdfGenerationStart;
-    
-    // Calculate metrics
+    // PASO 5: Métricas finales y retorno
     const totalDuration = Date.now() - startTime;
     const pdfSizeKB = Math.round(pdfBuffer.length / 1024);
     
     logger.pdf('PDF generated successfully', {
       trace_id,
       duration_ms: totalDuration,
-      pdf_generation_ms: pdfGenerationTime,
       file_size_bytes: pdfBuffer.length,
       file_size_kb: pdfSizeKB,
       report_name: info.report_name,
@@ -2815,47 +3222,42 @@ export async function generatePDF(data: any): Promise<Buffer> {
       template: info.report_template
     });
 
-    // Legacy log for backward compatibility (if needed)
-    console.log(
-      `[core-services] PDF generated successfully: ${info.report_file_name} (${pdfSizeKB}KB in ${totalDuration}ms)`
-    );
-    
-    await sendLog({
-      service: "pdf",
-      level: "INFO",
-      message: "PDF generated successfully",
-      trace_id,
-    });
-
     return pdfBuffer;
     
   } catch (error) {
     const errorDuration = Date.now() - startTime;
-    const errorMessage = (error as Error).message;
+    
+    // Si ya es nuestro error estructurado, re-lanzar
+    if (error instanceof PDFGenerationError) {
+      logger.pdf('PDF generation failed with structured error', {
+        trace_id,
+        duration_ms: errorDuration,
+        error_code: error.code,
+        error_message: error.message,
+        template: info?.report_template
+      });
+      throw error;
+    }
+    
+    // Convertir errores no estructurados a errores estructurados
+    const structuredError = createStructuredPDFError(error as Error, trace_id, info);
     
     logger.pdf('PDF generation failed', {
       trace_id,
       duration_ms: errorDuration,
-      error_code: 'PDF_GENERATION_ERROR',
-      error_message: errorMessage,
-      stack: (error as Error).stack,
-      template: info?.report_template,
-      report_name: info?.report_name
-    });
-
-    // Legacy log for backward compatibility
-    await sendLog({
-      service: "pdf",
-      level: "ERROR",
-      message: `Failed to generate PDF: ${errorMessage}`,
-      trace_id,
+      error_code: structuredError.code,
+      error_message: structuredError.message,
+      original_error: (error as Error).message,
+      template: info?.report_template
     });
     
-    throw error;
+    throw structuredError;
+    
   } finally {
+    // SIEMPRE liberar la página
     if (page) {
       try {
-        releasePage(page);
+        await releasePage(page);
         logger.pdf('Browser page released', {
           trace_id,
           duration_ms: Date.now() - startTime
@@ -2870,6 +3272,262 @@ export async function generatePDF(data: any): Promise<Buffer> {
     }
   }
 }
+
+/**
+ * Validación mejorada del request
+ */
+function validatePDFRequest(info: CoreReportInfo, trace_id: string): void {
+  if (!info) {
+    throw new PDFGenerationError(
+      'Missing core_report_info',
+      'MISSING_REPORT_INFO',
+      'The core_report_info object is required but was not provided',
+      'Include core_report_info in your request with all required fields',
+      400,
+      trace_id
+    );
+  }
+
+  if (!info.report_template) {
+    throw new PDFGenerationError(
+      'Missing report template',
+      'MISSING_TEMPLATE',
+      'report_template field is required in core_report_info',
+      'Specify a valid report_template name in core_report_info',
+      400,
+      trace_id
+    );
+  }
+
+  // Validar caracteres peligrosos
+  if (!/^[a-zA-Z0-9_-]+$/.test(info.report_template)) {
+    throw new PDFGenerationError(
+      'Invalid template name',
+      'INVALID_TEMPLATE_NAME',
+      'Template name contains invalid characters',
+      'Use only alphanumeric characters, underscores, and hyphens in template names',
+      400,
+      trace_id
+    );
+  }
+}
+
+/**
+ * Validar que existan los archivos de template
+ */
+async function validateTemplateFiles(templatePath: string, cssPath: string, trace_id: string): Promise<void> {
+  try {
+    await fs.access(templatePath, fs.constants.R_OK);
+  } catch (error) {
+    throw new PDFGenerationError(
+      'Template file not found',
+      'TEMPLATE_NOT_FOUND',
+      `Template file does not exist: ${templatePath}`,
+      'Ensure the template file exists and is readable, or contact the system administrator',
+      404,
+      trace_id
+    );
+  }
+
+  try {
+    await fs.access(cssPath, fs.constants.R_OK);
+  } catch (error) {
+    logger.pdf('CSS file not found, continuing without styles', {
+      trace_id,
+      css_path: cssPath,
+      warning: 'PDF will be generated without custom styles'
+    });
+  }
+}
+
+/**
+ * Compilar template de manera segura
+ */
+async function compileTemplate(
+  templatePath: string, 
+  cssPath: string, 
+  data: any, 
+  trace_id: string
+): Promise<[string, string]> {
+  try {
+    // Leer CSS (opcional)
+    let cssContent = '';
+    try {
+      cssContent = await fs.readFile(cssPath, "utf-8");
+    } catch {
+      // CSS es opcional
+      logger.pdf('No CSS file found, using default styles', { trace_id });
+    }
+
+    // Compilar template Pug
+    const compile = compileFile(templatePath);
+    const htmlContent = compile({
+      ...data,
+      embeddedCSS: cssContent ? `<style>${cssContent}</style>` : '',
+    });
+
+    return [cssContent, htmlContent];
+
+  } catch (error) {
+    if ((error as Error).message.includes('ENOENT')) {
+      throw new PDFGenerationError(
+        'Template compilation failed',
+        'TEMPLATE_NOT_FOUND',
+        `Template file not found: ${templatePath}`,
+        'Verify the template name and ensure the file exists',
+        404,
+        trace_id
+      );
+    }
+
+    throw new PDFGenerationError(
+      'Template compilation failed',
+      'TEMPLATE_COMPILATION_ERROR',
+      `Failed to compile Pug template: ${(error as Error).message}`,
+      'Check template syntax and data format, or contact support if the error persists',
+      500,
+      trace_id
+    );
+  }
+}
+
+/**
+ * Adquirir página de manera segura
+ */
+async function acquirePageSafely(trace_id: string): Promise<any> {
+  try {
+    return await acquirePage();
+  } catch (error) {
+    throw new PDFGenerationError(
+      'Browser page unavailable',
+      'BROWSER_POOL_ERROR',
+      `Failed to acquire browser page: ${(error as Error).message}`,
+      'The system is experiencing high load. Try again in a few seconds',
+      503,
+      trace_id
+    );
+  }
+}
+
+/**
+ * Renderizar PDF de manera segura
+ */
+async function renderPDF(page: any, htmlContent: string, trace_id: string): Promise<Buffer> {
+  try {
+    await page.setContent(htmlContent, { 
+      waitUntil: "domcontentloaded",
+      timeout: 30000 
+    });
+    
+    const pdfGenerationStart = Date.now();
+    const pdfBuffer = await page.pdf({
+      format: "A4",
+      printBackground: true,
+      timeout: 30000
+    });
+    const pdfGenerationTime = Date.now() - pdfGenerationStart;
+
+    logger.pdf('PDF rendering completed', {
+      trace_id,
+      pdf_generation_ms: pdfGenerationTime,
+      file_size_bytes: pdfBuffer.length
+    });
+
+    return pdfBuffer;
+
+  } catch (error) {
+    const errorMessage = (error as Error).message;
+    
+    if (errorMessage.includes('timeout') || errorMessage.includes('Navigation timeout')) {
+      throw new PDFGenerationError(
+        'PDF generation timeout',
+        'PDF_TIMEOUT',
+        'PDF generation took too long to complete',
+        'The document may be too complex. Try simplifying the content or contact support',
+        408,
+        trace_id
+      );
+    }
+
+    if (errorMessage.includes('Protocol error') || errorMessage.includes('Target closed')) {
+      throw new PDFGenerationError(
+        'Browser connection lost',
+        'BROWSER_CONNECTION_ERROR',
+        'Connection to browser was lost during PDF generation',
+        'This is usually temporary. Try again in a few seconds',
+        503,
+        trace_id
+      );
+    }
+
+    throw new PDFGenerationError(
+      'PDF rendering failed',
+      'PDF_RENDER_ERROR',
+      `Browser failed to render PDF: ${errorMessage}`,
+      'Check your document content and try again, or contact support if the error persists',
+      500,
+      trace_id
+    );
+  }
+}
+
+/**
+ * Crear error estructurado desde error genérico
+ */
+function createStructuredPDFError(
+  originalError: Error, 
+  trace_id: string, 
+  info?: CoreReportInfo
+): PDFGenerationError {
+  const message = originalError.message;
+  
+  // Categorizar errores comunes
+  if (message.includes('EACCES')) {
+    return new PDFGenerationError(
+      'File access denied',
+      'FILE_ACCESS_ERROR',
+      'Insufficient permissions to access template files',
+      'Contact your system administrator to check file permissions',
+      403,
+      trace_id
+    );
+  }
+
+  if (message.includes('EMFILE') || message.includes('ENFILE')) {
+    return new PDFGenerationError(
+      'System resource exhausted',
+      'RESOURCE_EXHAUSTION',
+      'Too many open files or browser instances',
+      'The system is overloaded. Try again in a few minutes',
+      503,
+      trace_id
+    );
+  }
+
+  if (message.includes('heap') || message.includes('memory')) {
+    return new PDFGenerationError(
+      'Memory exhausted',
+      'MEMORY_ERROR',
+      'Insufficient memory to generate PDF',
+      'The document may be too large. Try reducing content or contact support',
+      507,
+      trace_id
+    );
+  }
+
+  // Error genérico
+  return new PDFGenerationError(
+    'PDF generation failed',
+    'UNKNOWN_ERROR',
+    `Unexpected error: ${message}`,
+    'An unexpected error occurred. Contact support with this trace ID if the problem persists',
+    500,
+    trace_id
+  );
+}
+
+// Export del error personalizado para uso en routes
+export { PDFGenerationError };
 // src/services/pdf/routes.ts
 import express from 'express';
 import { generatePDF } from './generate';
@@ -3372,6 +4030,7 @@ export function getServiceContainer(): ServiceContainer {
   return serviceContainer;
 }
 // src/services/zpl/generate.ts
+// src/services/zpl/generate.ts - VERSIÓN MEJORADA
 import fs from 'fs';
 import path from 'path';
 import mustache from 'mustache';
@@ -3380,10 +4039,38 @@ import { v4 as uuidv4 } from 'uuid';
 import logger from '../../utils/logging';
 
 /**
+ * Estructura de error mejorada para ZPL generation
+ */
+class ZPLGenerationError extends Error {
+  public readonly code: string;
+  public readonly details: string;
+  public readonly userAction: string;
+  public readonly statusCode: number;
+  public readonly traceId: string;
+
+  constructor(
+    message: string,
+    code: string,
+    details: string,
+    userAction: string,
+    statusCode: number = 500,
+    traceId: string
+  ) {
+    super(message);
+    this.name = 'ZPLGenerationError';
+    this.code = code;
+    this.details = details;
+    this.userAction = userAction;
+    this.statusCode = statusCode;
+    this.traceId = traceId;
+  }
+}
+
+/**
  * Generates a ZPL string using a mustache template and dynamic data.
  * @param data Input JSON containing `core_report_info` and custom data
  * @returns Rendered ZPL string
- * @throws Error if template is missing or cannot be rendered
+ * @throws ZPLGenerationError if template is missing or cannot be rendered
  */
 export const generateZPL = async (data: any): Promise<string> => {
   const startTime = Date.now();
@@ -3399,47 +4086,51 @@ export const generateZPL = async (data: any): Promise<string> => {
     report_file_name: data.core_report_info?.report_file_name
   });
 
-  if (!templateName) {
-    logger.zpl('ZPL generation failed - missing template name', {
-      trace_id,
-      duration_ms: Date.now() - startTime,
-      error_code: 'MISSING_TEMPLATE_NAME',
-      has_core_report_info: !!data.core_report_info
-    });
-    throw new Error('Missing report_template in core_report_info');
+  // VALIDACIÓN MEJORADA
+  try {
+    validateZPLRequest(data, trace_id);
+  } catch (error) {
+    if (error instanceof ZPLGenerationError) {
+      throw error;
+    }
+    throw new ZPLGenerationError(
+      'ZPL request validation failed',
+      'VALIDATION_ERROR',
+      (error as Error).message,
+      'Check your request format and ensure all required fields are provided',
+      400,
+      trace_id
+    );
   }
 
   const templatePath = path.join(paths.zpl.templatePath, `${templateName}.zpl`);
   
-  logger.zpl('Checking template file', {
-    trace_id,
-    template_path: templatePath,
-    template_name: templateName,
-    duration_ms: Date.now() - startTime
-  });
-
-  if (!fs.existsSync(templatePath)) {
-    logger.zpl('ZPL generation failed - template not found', {
-      trace_id,
-      duration_ms: Date.now() - startTime,
-      error_code: 'TEMPLATE_NOT_FOUND',
-      template_path: templatePath,
-      template_name: templateName
-    });
-    throw new Error(`ZPL template not found: ${templatePath}`);
-  }
-
   try {
+    // PASO 1: Verificar template existe
+    logger.zpl('Verifying template file', {
+      trace_id,
+      template_path: templatePath,
+      template_name: templateName,
+      duration_ms: Date.now() - startTime
+    });
+
+    await validateTemplateExists(templatePath, templateName, trace_id);
+
+    // PASO 2: Leer template
     logger.zpl('Reading template file', {
       trace_id,
       template_path: templatePath,
       duration_ms: Date.now() - startTime
     });
 
-    const zplTemplate = fs.readFileSync(templatePath, 'utf-8');
+    const zplTemplate = await readTemplateSafely(templatePath, trace_id);
     const templateSize = zplTemplate.length;
     
-    logger.zpl('Template loaded, rendering with Mustache', {
+    // PASO 3: Validar template content
+    validateTemplateContent(zplTemplate, templateName, trace_id);
+    
+    // PASO 4: Renderizar con Mustache
+    logger.zpl('Rendering template with Mustache', {
       trace_id,
       template_size_bytes: templateSize,
       template_size_chars: templateSize,
@@ -3447,22 +4138,20 @@ export const generateZPL = async (data: any): Promise<string> => {
       duration_ms: Date.now() - startTime
     });
 
-    const renderStartTime = Date.now();
-    const zplRendered = mustache.render(zplTemplate, data);
-    const renderDuration = Date.now() - renderStartTime;
+    const zplRendered = await renderTemplateSafely(zplTemplate, data, templateName, trace_id);
     
-    // Calculate metrics
+    // PASO 5: Validar output
+    validateZPLOutput(zplRendered, trace_id);
+    
+    // PASO 6: Métricas finales
     const totalDuration = Date.now() - startTime;
     const outputSize = zplRendered.length;
     const compressionRatio = templateSize > 0 ? (outputSize / templateSize).toFixed(2) : '0';
-    
-    // Count labels (estimate based on ^XA commands which start a label)
-    const labelCount = (zplRendered.match(/\^XA/g) || []).length;
+    const labelCount = countZPLLabels(zplRendered);
     
     logger.zpl('ZPL generated successfully', {
       trace_id,
       duration_ms: totalDuration,
-      render_duration_ms: renderDuration,
       template_name: templateName,
       template_size_bytes: templateSize,
       output_size_bytes: outputSize,
@@ -3474,30 +4163,414 @@ export const generateZPL = async (data: any): Promise<string> => {
       report_file_name: data.core_report_info?.report_file_name
     });
 
-    // Legacy console log for backward compatibility
-    console.log(
-      `[core-services] ZPL generated successfully: ${templateName} (${labelCount} labels, ${outputSize} chars, ${totalDuration}ms)`
-    );
-
     return zplRendered;
     
   } catch (error) {
     const errorDuration = Date.now() - startTime;
-    const errorMessage = (error as Error).message;
     
-    logger.zpl('ZPL generation failed during rendering', {
+    // Si ya es nuestro error estructurado, re-lanzar
+    if (error instanceof ZPLGenerationError) {
+      logger.zpl('ZPL generation failed with structured error', {
+        trace_id,
+        duration_ms: errorDuration,
+        error_code: error.code,
+        error_message: error.message,
+        template_name: templateName
+      });
+      throw error;
+    }
+    
+    // Convertir errores no estructurados
+    const structuredError = createStructuredZPLError(error as Error, trace_id, templateName);
+    
+    logger.zpl('ZPL generation failed', {
       trace_id,
       duration_ms: errorDuration,
-      error_code: 'RENDERING_ERROR',
-      error_message: errorMessage,
-      stack: (error as Error).stack,
-      template_name: templateName,
-      template_path: templatePath
+      error_code: structuredError.code,
+      error_message: structuredError.message,
+      original_error: (error as Error).message,
+      template_name: templateName
     });
     
-    throw error;
+    throw structuredError;
   }
 };
+
+/**
+ * Validación mejorada del request
+ */
+function validateZPLRequest(data: any, trace_id: string): void {
+  if (!data.core_report_info) {
+    throw new ZPLGenerationError(
+      'Missing core_report_info',
+      'MISSING_REPORT_INFO',
+      'The core_report_info object is required but was not provided',
+      'Include core_report_info in your request with the report_template field',
+      400,
+      trace_id
+    );
+  }
+
+  const templateName = data.core_report_info.report_template;
+  if (!templateName) {
+    throw new ZPLGenerationError(
+      'Missing template name',
+      'MISSING_TEMPLATE_NAME',
+      'report_template field is required in core_report_info',
+      'Specify a valid report_template name in core_report_info',
+      400,
+      trace_id
+    );
+  }
+
+  // Validar caracteres peligrosos
+  if (!/^[a-zA-Z0-9_-]+$/.test(templateName)) {
+    throw new ZPLGenerationError(
+      'Invalid template name',
+      'INVALID_TEMPLATE_NAME',
+      'Template name contains invalid characters',
+      'Use only alphanumeric characters, underscores, and hyphens in template names',
+      400,
+      trace_id
+    );
+  }
+
+  // Validar longitud del nombre
+  if (templateName.length > 50) {
+    throw new ZPLGenerationError(
+      'Template name too long',
+      'TEMPLATE_NAME_TOO_LONG',
+      'Template name exceeds maximum length of 50 characters',
+      'Use a shorter template name',
+      400,
+      trace_id
+    );
+  }
+}
+
+/**
+ * Validar que el template existe
+ */
+async function validateTemplateExists(templatePath: string, templateName: string, trace_id: string): Promise<void> {
+  try {
+    const stats = await fs.promises.stat(templatePath);
+    
+    if (!stats.isFile()) {
+      throw new ZPLGenerationError(
+        'Template not found',
+        'TEMPLATE_NOT_FILE',
+        `Template path exists but is not a file: ${templatePath}`,
+        'Ensure the template is a valid file, not a directory',
+        404,
+        trace_id
+      );
+    }
+
+    // Verificar que sea legible
+    await fs.promises.access(templatePath, fs.constants.R_OK);
+    
+  } catch (error) {
+    if ((error as any).code === 'ENOENT') {
+      throw new ZPLGenerationError(
+        'Template not found',
+        'TEMPLATE_NOT_FOUND',
+        `ZPL template file does not exist: ${templatePath}`,
+        `Ensure the template '${templateName}.zpl' exists in the templates directory, or contact your administrator`,
+        404,
+        trace_id
+      );
+    }
+
+    if ((error as any).code === 'EACCES') {
+      throw new ZPLGenerationError(
+        'Template access denied',
+        'TEMPLATE_ACCESS_DENIED',
+        `Insufficient permissions to read template: ${templatePath}`,
+        'Contact your system administrator to check file permissions',
+        403,
+        trace_id
+      );
+    }
+
+    // Si ya es nuestro error, re-lanzar
+    if (error instanceof ZPLGenerationError) {
+      throw error;
+    }
+
+    throw new ZPLGenerationError(
+      'Template validation failed',
+      'TEMPLATE_VALIDATION_ERROR',
+      `Failed to validate template: ${(error as Error).message}`,
+      'Contact support if this problem persists',
+      500,
+      trace_id
+    );
+  }
+}
+
+/**
+ * Leer template de manera segura
+ */
+async function readTemplateSafely(templatePath: string, trace_id: string): Promise<string> {
+  try {
+    const templateContent = await fs.promises.readFile(templatePath, 'utf-8');
+    
+    if (templateContent.length === 0) {
+      throw new ZPLGenerationError(
+        'Empty template file',
+        'EMPTY_TEMPLATE',
+        'Template file exists but contains no content',
+        'Check the template file and ensure it contains valid ZPL content',
+        400,
+        trace_id
+      );
+    }
+
+    return templateContent;
+    
+  } catch (error) {
+    if (error instanceof ZPLGenerationError) {
+      throw error;
+    }
+
+    throw new ZPLGenerationError(
+      'Failed to read template',
+      'TEMPLATE_READ_ERROR',
+      `Error reading template file: ${(error as Error).message}`,
+      'Contact your system administrator to check file permissions and disk space',
+      500,
+      trace_id
+    );
+  }
+}
+
+/**
+ * Validar contenido del template
+ */
+function validateTemplateContent(templateContent: string, templateName: string, trace_id: string): void {
+  // Validar que contiene comandos ZPL básicos
+  if (!templateContent.includes('^XA') && !templateContent.includes('^xa')) {
+    throw new ZPLGenerationError(
+      'Invalid ZPL template',
+      'INVALID_ZPL_CONTENT',
+      'Template does not contain ZPL start command (^XA)',
+      'Ensure the template contains valid ZPL commands starting with ^XA',
+      400,
+      trace_id
+    );
+  }
+
+  // Validar tamaño razonable
+  if (templateContent.length > 1024 * 1024) { // 1MB
+    throw new ZPLGenerationError(
+      'Template too large',
+      'TEMPLATE_TOO_LARGE',
+      'Template file exceeds maximum size of 1MB',
+      'Use a smaller template or split into multiple templates',
+      413,
+      trace_id
+    );
+  }
+
+  logger.zpl('Template content validated', {
+    trace_id,
+    template_name: templateName,
+    content_length: templateContent.length,
+    has_start_command: templateContent.includes('^XA') || templateContent.includes('^xa')
+  });
+}
+
+/**
+ * Renderizar template con Mustache de manera segura
+ */
+async function renderTemplateSafely(
+  templateContent: string, 
+  data: any, 
+  templateName: string, 
+  trace_id: string
+): Promise<string> {
+  try {
+    const renderStartTime = Date.now();
+    
+    // Validar que data es serializable
+    try {
+      JSON.stringify(data);
+    } catch (error) {
+      throw new ZPLGenerationError(
+        'Invalid data format',
+        'DATA_NOT_SERIALIZABLE',
+        'Template data contains non-serializable content',
+        'Ensure all data values are JSON-serializable (no functions, circular references, etc.)',
+        400,
+        trace_id
+      );
+    }
+
+    const zplRendered = mustache.render(templateContent, data);
+    const renderDuration = Date.now() - renderStartTime;
+    
+    logger.zpl('Mustache rendering completed', {
+      trace_id,
+      template_name: templateName,
+      render_duration_ms: renderDuration,
+      input_size: templateContent.length,
+      output_size: zplRendered.length
+    });
+
+    return zplRendered;
+    
+  } catch (error) {
+    const errorMessage = (error as Error).message;
+    
+    if (error instanceof ZPLGenerationError) {
+      throw error;
+    }
+
+    // Errores específicos de Mustache
+    if (errorMessage.includes('Unclosed tag') || errorMessage.includes('Unopened tag')) {
+      throw new ZPLGenerationError(
+        'Template syntax error',
+        'MUSTACHE_SYNTAX_ERROR',
+        `Mustache template syntax error: ${errorMessage}`,
+        'Check template syntax for unmatched {{}} tags and correct them',
+        400,
+        trace_id
+      );
+    }
+
+    if (errorMessage.includes('Maximum call stack') || errorMessage.includes('RangeError')) {
+      throw new ZPLGenerationError(
+        'Template too complex',
+        'TEMPLATE_COMPLEXITY_ERROR',
+        'Template is too complex or contains circular references',
+        'Simplify the template or check for recursive references in your data',
+        400,
+        trace_id
+      );
+    }
+
+    throw new ZPLGenerationError(
+      'Template rendering failed',
+      'MUSTACHE_RENDER_ERROR',
+      `Failed to render template: ${errorMessage}`,
+      'Check template syntax and data format, or contact support if the error persists',
+      500,
+      trace_id
+    );
+  }
+}
+
+/**
+ * Validar output ZPL
+ */
+function validateZPLOutput(zplOutput: string, trace_id: string): void {
+  if (zplOutput.length === 0) {
+    throw new ZPLGenerationError(
+      'Empty ZPL output',
+      'EMPTY_OUTPUT',
+      'Template rendering produced no output',
+      'Check that your template data contains the required values',
+      500,
+      trace_id
+    );
+  }
+
+  // Validar tamaño razonable del output
+  if (zplOutput.length > 10 * 1024 * 1024) { // 10MB
+    throw new ZPLGenerationError(
+      'ZPL output too large',
+      'OUTPUT_TOO_LARGE',
+      'Generated ZPL exceeds maximum size of 10MB',
+      'Reduce the amount of data or use multiple smaller labels',
+      413,
+      trace_id
+    );
+  }
+
+  logger.zpl('ZPL output validated', {
+    trace_id,
+    output_size: zplOutput.length,
+    validation_passed: true
+  });
+}
+
+/**
+ * Contar labels en el ZPL
+ */
+function countZPLLabels(zplContent: string): number {
+  // Contar comandos ^XA que inician una label
+  const matches = zplContent.match(/\^XA/gi) || [];
+  return matches.length;
+}
+
+/**
+ * Crear error estructurado desde error genérico
+ */
+function createStructuredZPLError(
+  originalError: Error, 
+  trace_id: string, 
+  templateName?: string
+): ZPLGenerationError {
+  const message = originalError.message;
+  
+  // Categorizar errores comunes
+  if (message.includes('EACCES')) {
+    return new ZPLGenerationError(
+      'File access denied',
+      'FILE_ACCESS_ERROR',
+      'Insufficient permissions to access template files',
+      'Contact your system administrator to check file permissions',
+      403,
+      trace_id
+    );
+  }
+
+  if (message.includes('ENOENT')) {
+    return new ZPLGenerationError(
+      'Template not found',
+      'TEMPLATE_NOT_FOUND',
+      `Template file not found: ${templateName || 'unknown'}`,
+      'Verify the template name and ensure the file exists',
+      404,
+      trace_id
+    );
+  }
+
+  if (message.includes('EMFILE') || message.includes('ENFILE')) {
+    return new ZPLGenerationError(
+      'System resource exhausted',
+      'RESOURCE_EXHAUSTION',
+      'Too many open files',
+      'The system is overloaded. Try again in a few minutes',
+      503,
+      trace_id
+    );
+  }
+
+  if (message.includes('heap') || message.includes('memory')) {
+    return new ZPLGenerationError(
+      'Memory exhausted',
+      'MEMORY_ERROR',
+      'Insufficient memory to generate ZPL',
+      'The template or data may be too large. Try reducing content size',
+      507,
+      trace_id
+    );
+  }
+
+  // Error genérico
+  return new ZPLGenerationError(
+    'ZPL generation failed',
+    'UNKNOWN_ERROR',
+    `Unexpected error: ${message}`,
+    'An unexpected error occurred. Contact support with this trace ID if the problem persists',
+    500,
+    trace_id
+  );
+}
+
+// Export del error personalizado para uso en routes
+export { ZPLGenerationError };
 // src/services/zpl/routes.ts
 import express from 'express';
 import { generateZPL } from './generate';
@@ -3742,9 +4815,6 @@ export async function getAuthToken(): Promise<string> {
         verbose_response_headers_content_type: response.headers['content-type']
       })
     });
-
-    // Safe console log (no sensitive data)
-    console.log(`🔑 Auth token acquired (${tokenLength} chars, expires in ${Math.round(expiresIn/60)}min)`);
     
     return cachedToken;
     
@@ -3774,8 +4844,6 @@ export async function getAuthToken(): Promise<string> {
       })
     });
 
-    // Safe console error (no sensitive data)
-    console.error(`❌ Authentication failed: ${err.message}`);
     throw new Error("Authentication failed");
   }
 }

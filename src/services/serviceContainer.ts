@@ -6,6 +6,15 @@ import { AuthConfig } from '../utils/getToken';
 import { initializeBrowserPool } from '../config/browserPool';
 
 /**
+ * Browser Pool Configuration
+ */
+export interface BrowserPoolConfig {
+  maxBrowsers: number;
+  maxPagesPerBrowser: number;
+  pageIdleTimeout: number;
+}
+
+/**
  * Service Container for Dependency Injection
  * Centralizes all service configurations and provides clean access
  */
@@ -14,6 +23,7 @@ export class ServiceContainer {
   private jwtSecret: string;
   private pdfSigningConfig: PdfSigningConfig;
   private authConfig: AuthConfig;
+  private browserPoolConfig: BrowserPoolConfig;
 
   constructor(appConfig: any) {
     // Email service configuration
@@ -37,9 +47,16 @@ export class ServiceContainer {
 
     // Auth configuration
     this.authConfig = {
-      authUrl: appConfig.authFullUrl, // Using authFullUrl from your original config
+      authUrl: appConfig.authFullUrl,
       authUsername: appConfig.authUsername,
       authPassword: appConfig.authPassword
+    };
+
+    // Browser Pool configuration
+    this.browserPoolConfig = {
+      maxBrowsers: appConfig.maxBrowsers || 2,
+      maxPagesPerBrowser: appConfig.maxPagesPerBrowser || 3,
+      pageIdleTimeout: appConfig.pageIdleTimeout || 300000
     };
   }
 
@@ -82,6 +99,13 @@ export class ServiceContainer {
   getAuthConfig(): AuthConfig {
     return this.authConfig;
   }
+
+  /**
+   * Get Browser Pool Configuration
+   */
+  getBrowserPoolConfig(): BrowserPoolConfig {
+    return this.browserPoolConfig;
+  }
 }
 
 // Global service container instance
@@ -94,10 +118,15 @@ let serviceContainer: ServiceContainer | null = null;
 export async function initServiceContainer(appConfig: any): Promise<ServiceContainer> {
   serviceContainer = new ServiceContainer(appConfig);
   
-  // Inicializar browser pool también
-  await initializeBrowserPool();
-  console.log('🌐 Browser pool initialized');
- 
+  // Inicializar browser pool con la configuración del container
+  await initializeBrowserPool(serviceContainer.getBrowserPoolConfig());
+  
+  console.log('🌐 Browser pool initialized with config:', {
+    maxBrowsers: serviceContainer.getBrowserPoolConfig().maxBrowsers,
+    maxPagesPerBrowser: serviceContainer.getBrowserPoolConfig().maxPagesPerBrowser,
+    pageIdleTimeout: serviceContainer.getBrowserPoolConfig().pageIdleTimeout
+  });
+  
   return serviceContainer;
 }
 

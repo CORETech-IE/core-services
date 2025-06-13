@@ -204,6 +204,11 @@ const loadConfig = async () => {
       authUsername: secretsConfig.auth_username ?? yamlConfig.authUsername,
       authPassword: secretsConfig.auth_password ?? yamlConfig.authPassword,
       
+      // Browser Pool Configuration
+      maxBrowsers: yamlConfig.maxBrowsers ?? secretsConfig.max_browsers ?? 2,
+      maxPagesPerBrowser: yamlConfig.maxPagesPerBrowser ?? secretsConfig.max_pages_per_browser ?? 3,
+      pageIdleTimeout: yamlConfig.pageIdleTimeout ?? secretsConfig.page_idle_timeout ?? 300000,      
+
       // Build URLs from config
       coreApiHost: yamlConfig.coreApiHost ?? '',
       servicesPort: yamlConfig.servicesPort ?? '',
@@ -216,6 +221,8 @@ const loadConfig = async () => {
       certPdfSignType: yamlConfig.certPdfSignType ?? 'p12',
       certPdfSignPath: secretsConfig.cert_pdf_sign_path ?? yamlConfig.certPdfSignPath ?? '',
       certPdfSignPassword: secretsConfig.cert_pdf_sign_password ?? yamlConfig.certPdfSignPassword ?? '',
+
+      
       
       // Metadata
       config_source: 'SOPS_ONLY'
