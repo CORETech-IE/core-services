@@ -111,9 +111,6 @@ export async function getAuthToken(): Promise<string> {
         verbose_response_headers_content_type: response.headers['content-type']
       })
     });
-
-    // Safe console log (no sensitive data)
-    console.log(`🔑 Auth token acquired (${tokenLength} chars, expires in ${Math.round(expiresIn/60)}min)`);
     
     return cachedToken;
     
@@ -143,8 +140,6 @@ export async function getAuthToken(): Promise<string> {
       })
     });
 
-    // Safe console error (no sensitive data)
-    console.error(`❌ Authentication failed: ${err.message}`);
     throw new Error("Authentication failed");
   }
 }

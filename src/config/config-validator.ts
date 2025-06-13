@@ -34,7 +34,6 @@ export function validateConfig(config: any): void {
       operation: 'SYSTEM',
       error_code: 'CONFIG_NULL'
     });
-    console.error("❌ Configuration is null or undefined");
     process.exit(1);
   }
 
@@ -51,8 +50,6 @@ export function validateConfig(config: any): void {
       total_required: requiredVars.length
     });
     
-    console.error("❌ Missing required environment variables:");
-    missing.forEach(({ label }) => console.error(`  - ${label}`));
     process.exit(1);
   }
 
@@ -68,6 +65,4 @@ export function validateConfig(config: any): void {
       tenant_id: config.tenantId
     })
   });
-
-  console.log("✅ All required environment variables are present.");
 }

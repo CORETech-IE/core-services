@@ -1,3 +1,4 @@
+// src/app.ts - FIXED: Dynamic host configuration
 import express from "express";
 import helmet from "helmet";
 import { getConfigAsync } from "./config/envConfig";
@@ -15,37 +16,55 @@ import { initGDPRService } from "./services/gdpr/gdprTokenService";
 
 const startApp = async () => {
   const config = await getConfigAsync();
-  console.log("🚀 Config loaded!");
+  logger.system("Config loaded successfully", {
+    config_source: config.config_source || 'unknown',
+    has_required_fields: !!(config.clientId && config.senderEmail && config.jwtSecret)
+  });
 
   validateConfig(config);
-  console.log("✅ Config validated!");
+  logger.system("Config validation passed", {
+    validated_fields: ['clientId', 'clientSecret', 'tenantId', 'senderEmail'],
+    config_mode: config.config_source
+  });
 
   await initServiceContainer(config);
-  console.log("🏗️ Service container initialized");
+  logger.container("Service container initialized successfully", {
+    email_config: !!config.senderEmail,
+    pdf_config: !!config.certPdfSignPath,
+    jwt_config: !!config.jwtSecret
+  });
 
-  // Después de initServiceContainer:
+  // After initServiceContainer:
   initGDPRService();
-  console.log("🔐 GDPR service initialized");
+  logger.system("GDPR service initialized", {
+    default_token_expiry: '24 hours',
+    cleanup_interval: '1 hour'
+  });
 
   logger.startMetrics(30000); // Start metrics collection every 30 seconds
-  console.log("📊 Metrics collection started");
+  logger.system("Metrics collection started", {
+    interval_ms: 30000,
+    metrics_file: 'core-services-metrics-*.log'
+  });
 
   // Create JWT middleware with loaded config
   const authenticateJWT = createAuthenticateJWT(config.jwtSecret);
-  console.log("🔐 JWT middleware created");
+  logger.auth("JWT middleware created", {
+    jwt_secret_length: config.jwtSecret?.length || 0
+  });
 
   const app = express();
   app.use(helmet());
   app.use(express.json());
 
-  // Auth routes - para poder hacer login
+  // Auth routes - for login capability
   app.use("/auth", authRoutes);
 
-  // EMAIL ROUTES - ¡EL MOMENTO DE LA VERDAD!
+  // EMAIL ROUTES - TESTING MODE (authentication disabled)
   app.use("/api/email", /*authenticateJWT, authorizeAdmin,*/ emailPublicRoutes);
   app.use("/api/gdpr", gdprRoutes);
 
-  // Public routes for pdf and zpl services
+  // Public routes for pdf and zpl services - TESTING MODE (authentication disabled)
   app.use("/generate-pdf", /*authenticateJWT, authorizeAdmin,*/ pdfRoutes);
   app.use("/generate-zpl", /*authenticateJWT, authorizeAdmin,*/ zplRoutes);
 
@@ -53,16 +72,81 @@ const startApp = async () => {
     res.status(200).send("OK");
   });
 
-  console.log("📝 About to start express server...");
+  logger.system("Express server configuration completed", {
+    routes: ['/auth', '/api/email', '/api/gdpr', '/generate-pdf', '/generate-zpl', '/health'],
+    middleware: ['helmet', 'express.json'],
+    authentication: 'DISABLED_FOR_TESTING'
+  });
 
+  // FIXED: Dynamic host and port configuration
   const PORT = config.servicesPort || 3001;
-  app.listen(PORT, () => {
-    console.log(`[core-services] API listening on port ${PORT}`);
-    console.log("[core-services] 🚀 FULL EMAIL FUNCTIONALITY");
-    console.log("[core-services] Ready for ISO 27001 compliant emails!");
+  const HOST = process.env.HOST || '0.0.0.0'; // Default to listen on all interfaces
+  
+  // Build dynamic base URL for API endpoints
+  const getBaseUrl = () => {
+    // Priority: explicit config > environment > fallback
+    if (config.coreApiHost) {
+      return config.coreApiHost;
+    }
+    
+    if (process.env.API_BASE_URL) {
+      return process.env.API_BASE_URL;
+    }
+    
+    // Fallback for development
+    const protocol = process.env.NODE_ENV === 'production' ? 'https' : 'http';
+    const hostname = process.env.HOSTNAME || 'localhost';
+    return `${protocol}://${hostname}`;
+  };
+
+  const baseUrl = getBaseUrl();
+  const fullApiUrl = `${baseUrl}:${PORT}`;
+
+  app.listen(PORT, HOST, () => {
+    logger.system(`Core Services API started successfully`, {
+      host: HOST,
+      port: PORT,
+      base_url: baseUrl,
+      full_api_url: fullApiUrl,
+      listen_address: `${HOST}:${PORT}`,
+      api_endpoints: {
+        health: `${fullApiUrl}/health`,
+        auth: `${fullApiUrl}/auth/login`,
+        email: `${fullApiUrl}/api/email/send-with-consent`,
+        pdf: `${fullApiUrl}/generate-pdf`,
+        zpl: `${fullApiUrl}/generate-zpl`,
+        gdpr: `${fullApiUrl}/api/gdpr/generate-token`
+      },
+      configuration: {
+        environment: process.env.NODE_ENV || 'development',
+        config_source: config.config_source,
+        api_host_from: config.coreApiHost ? 'config' : 
+                      process.env.API_BASE_URL ? 'env_API_BASE_URL' : 
+                      'fallback'
+      },
+      features: [
+        'ISO 27001 compliant emails',
+        'PDF generation with signing',
+        'ZPL label generation',
+        'GDPR consent management'
+      ],
+      ready: true
+    });
   });
 };
 
-console.log("🔄 Listen called, waiting for server...");
+logger.system("Starting Core Services application", {
+  node_version: process.version,
+  platform: process.platform,
+  environment: process.env.NODE_ENV || 'development',
+  hostname: process.env.HOSTNAME || 'localhost',
+  host_binding: process.env.HOST || '0.0.0.0'
+});
 
-startApp().catch(console.error);
+startApp().catch(error => {
+  logger.error("Failed to start Core Services application", {
+    error: error.message,
+    stack: error.stack
+  });
+  process.exit(1);
+});

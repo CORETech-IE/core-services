@@ -3,6 +3,7 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import yaml from 'js-yaml';
+import logger from "../utils/logging";
 
 /**
  * SIMPLIFIED CONFIG LOADER - SOPS ONLY
@@ -19,16 +20,16 @@ const getClientId = (): string => {
   const cliClientId = cliArgs.find(arg => !arg.startsWith('--'));
   
   if (cliClientId) {
-    console.log(`🎯 Using CLIENT_ID: ${cliClientId}`);
+    logger.system(`Using CLIENT_ID from CLI: ${cliClientId}`);
     return cliClientId;
   }
   
   if (process.env.CLIENT_ID) {
-    console.log(`🎯 Using CLIENT_ID from ENV: ${process.env.CLIENT_ID}`);
+    logger.system(`Using CLIENT_ID from ENV: ${process.env.CLIENT_ID}`);
     return process.env.CLIENT_ID;
   }
   
-  console.log(`🎯 Using default CLIENT_ID: core-dev`);
+  logger.system(`Using default CLIENT_ID: core-dev`);
   return 'core-dev';
 };
 
@@ -37,13 +38,13 @@ const getClientId = (): string => {
  */
 const getGPGPassphrase = (): string => {
   if (process.env.GPG_PASSPHRASE) {
-    console.log('🔑 Using GPG passphrase from environment');
+    logger.system('Using GPG passphrase from environment');
     return process.env.GPG_PASSPHRASE;
   }
   
   const passphraseArg = process.argv.find(arg => arg.startsWith('--gpg-passphrase='));
   if (passphraseArg) {
-    console.log('🔑 Using GPG passphrase from CLI argument');
+    logger.system('Using GPG passphrase from CLI argument');
     return passphraseArg.split('=')[1];
   }
   
@@ -65,15 +66,23 @@ const getSopsPath = (envsRepoPath: string): string => {
  * Decrypt SOPS file using spawn for better process control
  */
 const decryptSopsAsync = async (sopsPath: string, secretsPath: string, gpgPassphrase: string): Promise<string> => {
-  console.log('🔐 Decrypting SOPS file...');
+  logger.system('🔐 Decrypting SOPS file...');
   
   return new Promise((resolve, reject) => {
     const gnupgHome = process.env.GNUPGHOME || path.join(process.env.APPDATA!, 'gnupg');
     
-    console.log('🔍 SOPS Environment:');
-    console.log('  SOPS Path:', sopsPath);
-    console.log('  Secrets Path:', secretsPath);
-    console.log('  GNUPGHOME:', gnupgHome);
+    logger.debug('SOPS Environment details', {
+      sops_path: sopsPath,
+      secrets_path: secretsPath,
+      gnupg_home: gnupgHome,
+      ...(logger.isVerbose() && {
+        verbose_full_env: {
+          GNUPGHOME: gnupgHome,
+          GPG_TTY: process.platform === 'win32' ? undefined : '/dev/null',
+          GPG_BATCH: '1'
+        }
+      })
+    });
     
     const sopsProcess = spawn(sopsPath, [
       '-d', 
@@ -106,17 +115,21 @@ const decryptSopsAsync = async (sopsPath: string, secretsPath: string, gpgPassph
 
     sopsProcess.on('close', (code) => {
       if (code === 0) {
-        console.log('✅ SOPS decryption successful');
+        logger.system('SOPS decryption successful');
         resolve(stdout);
       } else {
-        console.log('❌ SOPS decryption failed with code:', code);
-        console.log('❌ STDERR:', stderr);
+        logger.error('SOPS decryption failed', {
+          exit_code: code,
+          stderr: stderr
+        });
         reject(new Error(`SOPS decryption failed: ${stderr}`));
       }
     });
 
     sopsProcess.on('error', (error) => {
-      console.log('❌ SOPS process error:', error.message);
+      logger.error('SOPS process error', {
+        error: error.message
+      });
       reject(error);
     });
   });

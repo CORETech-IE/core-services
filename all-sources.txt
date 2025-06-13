@@ -199,95 +199,22 @@ export function validateConfig(config: any): void {
 
   console.log("✅ All required environment variables are present.");
 }
-// src/config/config.ts
-import fs from 'fs';
-import path from 'path';
-import yaml from 'js-yaml';
-import dotenv from 'dotenv';
-
-// Load environment variables from .env if available
-//dotenv.config();
-dotenv.config({ path: path.resolve(__dirname, './.env') });
-
-// Get client ID from CLI argument
-const clientId = process.argv[2];
-if (!clientId) {
-  console.error('❌ Missing CLIENT_ID. Usage: npm run dev -- core-dev');
-  process.exit(1);
-}
-
-// Resolve path to config.yaml (shared repo)
-const envsPath = path.resolve(__dirname, '../../../core-envs-private/clients', clientId);
-const configPath = path.join(envsPath, 'config.yaml');
-
-let clientConfig: any = {};
-
-try {
-  const fileContents = fs.readFileSync(configPath, 'utf8');
-  clientConfig = yaml.load(fileContents);
-} catch (error) {
-  console.error(`❌ Failed to load config for client "${clientId}" from ${configPath}`);
-  console.error(error);
-  process.exit(1);
-}
-
-export const config = {
-  pdf: {
-    templatePath: path.resolve(__dirname, '../../../reports_templates/templates'),
-    cssPath: path.resolve(__dirname, '../../../reports_templates/css')
-  },
-  zpl: {
-    templatePath: path.resolve(__dirname, '../../../reports_templates/templates')
-  },
-  email: {
-    smtpHost: clientConfig.smtp?.host || 'localhost',
-    smtpPort: clientConfig.smtp?.port || 587,
-    smtpUser: clientConfig.smtp?.user || '',
-    smtpPass: clientConfig.smtp?.pass || ''
-  },
-  auth: {
-    authUrl: process.env.AUTH_URL || 'http://localhost:3000/auth/login',
-    apiUrl: process.env.API_URL || 'http://localhost:3000/api',
-    username: process.env.AUTH_USERNAME,
-    password: process.env.AUTH_PASSWORD
-  },
-  security: {
-    jwtSecret: process.env.JWT_SECRET || '',
-    internalJwtSecret: process.env.INTERNAL_JWT_SECRET || ''
-  },
-  oauth: {
-    senderEmail: process.env.SENDER_EMAIL || '',
-    clientId: process.env.CLIENT_ID || '',
-    clientSecret: process.env.CLIENT_SECRET || '',
-    tenantId: process.env.TENANT_ID || '',
-    refreshToken: process.env.REFRESH_TOKEN || '',
-    tenantClientId: process.env.TENANT_CLIENT_ID || '',
-    tokenEndpoint: process.env.TOKEN_ENDPOINT || 'https://login.microsoftonline.com'
-  },
-  cert: {
-    certPdfSignType: process.env.CERT_PDF_SIGN_TYPE || 'p12', 
-    certPdfSignPassword: process.env.CERT_PDF_SIGN_PASSWORD, 
-    certPdfSignPath: process.env.CERT_PDF_SIGN_PATH , 
-  },
-  client: clientId,
-  raw: clientConfig
-};
-
 // src/config/envConfig.ts
-// config/envConfig.ts
-import { execSync, spawn } from 'child_process';
+// config/envConfig.ts - SIMPLIFIED VERSION - SOPS ONLY
+import { spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import os from 'os';
 import yaml from 'js-yaml';
 
 /**
- * SOLUCIÓN DEFINITIVA para el problema GPG/SOPS en Windows
- * Usa spawn en lugar de execSync para mejor herencia de entorno
+ * SIMPLIFIED CONFIG LOADER - SOPS ONLY
+ * 
+ * This version removes all .env complexity and focuses on SOPS decryption.
+ * Clean, simple, and maintainable.
  */
 
 /**
- * Get client ID from CLI args
+ * Get client ID from CLI args or environment
  */
 const getClientId = (): string => {
   const cliArgs = process.argv.slice(2);
@@ -308,7 +235,7 @@ const getClientId = (): string => {
 };
 
 /**
- * Get GPG passphrase from CLI argument
+ * Get GPG passphrase from environment or CLI argument
  */
 const getGPGPassphrase = (): string => {
   if (process.env.GPG_PASSPHRASE) {
@@ -322,7 +249,7 @@ const getGPGPassphrase = (): string => {
     return passphraseArg.split('=')[1];
   }
   
-  throw new Error('GPG passphrase not found. Use --gpg-passphrase=xxx');
+  throw new Error('GPG passphrase not found. Set GPG_PASSPHRASE env var or use --gpg-passphrase=xxx');
 };
 
 /**
@@ -337,14 +264,12 @@ const getSopsPath = (envsRepoPath: string): string => {
 };
 
 /**
- * SOLUCIÓN DEFINITIVA: Usar spawn en lugar de execSync
- * Esto permite mejor herencia del contexto GPG de PowerShell
+ * Decrypt SOPS file using spawn for better process control
  */
 const decryptSopsAsync = async (sopsPath: string, secretsPath: string, gpgPassphrase: string): Promise<string> => {
-  console.log('🚀 ASYNC SOPS decryption with spawn (herencia completa de entorno)...');
+  console.log('🔐 Decrypting SOPS file...');
   
   return new Promise((resolve, reject) => {
-    // Preparar entorno - usar el mismo GNUPGHOME que PowerShell
     const gnupgHome = process.env.GNUPGHOME || path.join(process.env.APPDATA!, 'gnupg');
     
     console.log('🔍 SOPS Environment:');
@@ -352,7 +277,6 @@ const decryptSopsAsync = async (sopsPath: string, secretsPath: string, gpgPassph
     console.log('  Secrets Path:', secretsPath);
     console.log('  GNUPGHOME:', gnupgHome);
     
-    // Spawn SOPS con herencia COMPLETA del entorno
     const sopsProcess = spawn(sopsPath, [
       '-d', 
       '--output-type', 
@@ -361,14 +285,13 @@ const decryptSopsAsync = async (sopsPath: string, secretsPath: string, gpgPassph
     ], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { 
-        ...process.env,  // ← HEREDA TODO el contexto de PowerShell
+        ...process.env,
         GNUPGHOME: gnupgHome,
         GPG_PASSPHRASE: gpgPassphrase,
-        // Variables adicionales para asegurar funcionamiento
         GPG_TTY: process.platform === 'win32' ? undefined : '/dev/null',
         GPG_BATCH: '1'
       },
-      shell: true,  // ← IMPORTANTE en Windows
+      shell: true,
       windowsHide: true
     });
 
@@ -385,112 +308,27 @@ const decryptSopsAsync = async (sopsPath: string, secretsPath: string, gpgPassph
 
     sopsProcess.on('close', (code) => {
       if (code === 0) {
-        console.log('✅ SOPS decryption successful with spawn!');
+        console.log('✅ SOPS decryption successful');
         resolve(stdout);
       } else {
-        console.log('❌ SOPS spawn failed with code:', code);
+        console.log('❌ SOPS decryption failed with code:', code);
         console.log('❌ STDERR:', stderr);
-        
-        // FALLBACK: Si spawn falla, intentar método directo con PowerShell
-        console.log('🔄 Trying PowerShell fallback...');
-        
-        try {
-          // MÉTODO 1: Test super básico de PowerShell
-          console.log('🔬 Testing basic PowerShell functionality...');
-          
-          const basicTest = execSync('powershell -NoProfile -Command "Write-Host BASIC_TEST_OK"', {
-            encoding: 'utf8',
-            timeout: 10000
-          });
-          
-          console.log('✅ Basic PowerShell test result:', basicTest.trim());
-          
-          // MÉTODO 2: Test GPG directamente desde cmd (no PowerShell)
-          console.log('🔬 Testing GPG from CMD directly...');
-          
-          const cmdGpgTest = execSync(`gpg --list-secret-keys --keyid-format LONG`, {
-            encoding: 'utf8',
-            timeout: 10000,
-            env: {
-              ...process.env,
-              GNUPGHOME: gnupgHome
-            }
-          });
-          
-          const hasNewKey = cmdGpgTest.includes('84F09B1D810A6590');
-          const hasNewFingerprint = cmdGpgTest.includes('EC5A8F24358F986C983BA5F384F09B1D810A6590');
-          
-          console.log('🔍 CMD GPG Results:');
-          console.log('  - Contains new key (84F09B1D...):', hasNewKey);
-          console.log('  - Contains new fingerprint (EC5A8F24...):', hasNewFingerprint);
-          console.log('  - GPG output length:', cmdGpgTest.length);
-          
-          if (!hasNewKey && !hasNewFingerprint) {
-            console.log('❌ CMD GPG test shows keys are missing!');
-            console.log('📝 Available keys:', cmdGpgTest.split('\n').slice(0, 5).join('\n'));
-            reject(new Error('Secret keys not visible even from CMD'));
-            return;
-          }
-          
-          // MÉTODO 3: Test SOPS directamente desde cmd
-          console.log('🔬 Testing SOPS from CMD directly...');
-          
-          const cmdSopsResult = execSync(`"${sopsPath}" -d --output-type json "${secretsPath}"`, {
-            encoding: 'utf8',
-            timeout: 30000,
-            env: {
-              ...process.env,
-              GNUPGHOME: gnupgHome,
-              GPG_PASSPHRASE: gpgPassphrase
-            }
-          });
-          
-          console.log('✅ CMD SOPS worked! JSON length:', cmdSopsResult.length);
-          resolve(cmdSopsResult);
-          
-        } catch (psError) {
-          console.log('❌ ALL methods failed:', (psError as Error).message);
-          
-          // MÉTODO FINAL: Debug del error específico
-          if ((psError as any).stderr) {
-            console.log('📝 Error STDERR:', (psError as any).stderr);
-          }
-          
-          reject(new Error(`All SOPS methods failed: ${(psError as Error).message}`));
-        }
+        reject(new Error(`SOPS decryption failed: ${stderr}`));
       }
     });
 
     sopsProcess.on('error', (error) => {
-      console.log('❌ SOPS spawn error:', error.message);
+      console.log('❌ SOPS process error:', error.message);
       reject(error);
     });
   });
 };
 
 /**
- * Determine if we should use standalone mode
+ * Load configuration using SOPS only
  */
-const shouldUseStandalone = (): boolean => {
-  if (process.argv.includes('--standalone')) return true;
-  if (process.env.CONFIG_MODE === 'standalone') return true;
-  
-  // Check if SOPS binary exists
-  const envsRepoPath = path.resolve(__dirname, '../../../core-envs-private');
-  const sopsPath = path.join(envsRepoPath, 'tools/win64/sops.exe');
-  const hasSOPS = fs.existsSync(sopsPath);
-  
-  // Check if .env exists
-  const hasEnv = fs.existsSync(path.join(__dirname, '../.env'));
-  
-  return hasSOPS && !hasEnv;
-};
-
-/**
- * Load config in standalone mode (SOPS)
- */
-const loadStandaloneConfig = async () => {
-  console.log('🔧 Loading config via SOPS (Standalone Mode)');
+const loadConfig = async () => {
+  console.log('🔧 Loading config via SOPS');
   
   const clientId = getClientId();
   const gpgPassphrase = getGPGPassphrase();
@@ -504,7 +342,7 @@ const loadStandaloneConfig = async () => {
   console.log(`📂 Using repo: ${envsRepoPath}`);
   
   try {
-    // 1. Load config.yaml
+    // 1. Load config.yaml (public configuration)
     const yamlPath = path.join(envsRepoPath, `clients/${clientId}/config.yaml`);
     if (!fs.existsSync(yamlPath)) {
       throw new Error(`Client config.yaml not found: ${clientId}`);
@@ -513,6 +351,7 @@ const loadStandaloneConfig = async () => {
     const yamlFile = fs.readFileSync(yamlPath, 'utf8');
     const yamlParsed = yaml.load(yamlFile) as Record<string, any>;
     
+    // Convert snake_case to camelCase for consistency
     const yamlConfig = Object.entries(yamlParsed).reduce((acc, [key, value]) => {
       const camelKey = key.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
       acc[camelKey] = value;
@@ -532,16 +371,15 @@ const loadStandaloneConfig = async () => {
     const sopsPath = getSopsPath(envsRepoPath);
     console.log(`🔧 Using SOPS: ${sopsPath}`);
     
-    // ✅ USAR ASYNC SPAWN en lugar de execSync
     const decryptOutput = await decryptSopsAsync(sopsPath, secretsPath, gpgPassphrase);
-    
     const secretsConfig = JSON.parse(decryptOutput);
     console.log('✅ Secrets decrypted successfully');
     
-    // 3. Merge configs
+    // 3. Merge configs with proper field mapping
     const mergedConfig = {
       ...yamlConfig,
       ...secretsConfig,
+      
       // Map snake_case to camelCase for key fields
       senderEmail: secretsConfig.sender_email ?? yamlConfig.senderEmail ?? '',
       clientId: secretsConfig.client_id ?? yamlConfig.clientId ?? '',
@@ -555,7 +393,7 @@ const loadStandaloneConfig = async () => {
       authUsername: secretsConfig.auth_username ?? yamlConfig.authUsername,
       authPassword: secretsConfig.auth_password ?? yamlConfig.authPassword,
       
-      // URLs
+      // Build URLs from config
       coreApiHost: yamlConfig.coreApiHost ?? '',
       servicesPort: yamlConfig.servicesPort ?? '',
       authUrl: yamlConfig.authUrl ?? '',
@@ -563,109 +401,22 @@ const loadStandaloneConfig = async () => {
       apiUrl: `${yamlConfig.coreApiHost}:${yamlConfig.servicesPort}${yamlConfig.backendUrl}`,
       authFullUrl: `${yamlConfig.coreApiHost}:${yamlConfig.servicesPort}${yamlConfig.authUrl}`,
       
-      // Certificates
+      // Certificate configuration
       certPdfSignType: yamlConfig.certPdfSignType ?? 'p12',
       certPdfSignPath: secretsConfig.cert_pdf_sign_path ?? yamlConfig.certPdfSignPath ?? '',
       certPdfSignPassword: secretsConfig.cert_pdf_sign_password ?? yamlConfig.certPdfSignPassword ?? '',
       
       // Metadata
-      standalone_mode: true,
-      config_source: 'SOPS_STANDALONE'
+      config_source: 'SOPS_ONLY'
     };
     
-    console.log('✅ Config loaded successfully in standalone mode');
+    console.log('✅ Config loaded successfully via SOPS');
     
     return mergedConfig;
     
   } catch (error) {
-    console.error('❌ Standalone config loading failed:', (error as Error).message);
+    console.error('❌ Config loading failed:', (error as Error).message);
     throw error;
-  }
-};
-
-/**
- * Load config in traditional mode (.env + YAML)
- */
-const loadTraditionalConfig = () => {
-  console.log('🔧 Loading config via .env + YAML (Traditional Mode)');
-  
-  const envPath = path.resolve(__dirname, '../.env');
-  if (fs.existsSync(envPath)) {
-    const envContent = fs.readFileSync(envPath, 'utf8');
-    const envVars = envContent
-      .split('\n')
-      .filter(line => line.includes('=') && !line.startsWith('#'))
-      .reduce((acc, line) => {
-        const [key, ...valueParts] = line.split('=');
-        const value = valueParts.join('=').trim();
-        acc[key.trim()] = value.replace(/^["']|["']$/g, '');
-        return acc;
-      }, {} as Record<string, string>);
-    
-    Object.assign(process.env, envVars);
-    console.log(`✅ Loaded .env from: ${envPath}`);
-  } else {
-    console.warn(`⚠️ .env not found at: ${envPath}`);
-  }
-
-  const clientId = getClientId();
-  const yamlPath = path.resolve(__dirname, `../../../core-envs-private/clients/${clientId}/config.yaml`);
-  let yamlConfig: Record<string, any> = {};
-  
-  try {
-    const file = fs.readFileSync(yamlPath, 'utf8');
-    const parsed = yaml.load(file) as Record<string, any>;
-    
-    yamlConfig = Object.entries(parsed).reduce((acc, [key, value]) => {
-      const camelKey = key.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
-      acc[camelKey] = value;
-      return acc;
-    }, {} as Record<string, any>);
-    
-    console.log(`✅ Loaded config.yaml from: ${yamlPath}`);
-  } catch (err) {
-    console.warn(`⚠️ Failed to load config.yaml:`, err);
-  }
-
-  return {
-    ...yamlConfig,
-    senderEmail: process.env.sender_email ?? yamlConfig.senderEmail ?? '',
-    clientId: process.env.client_id ?? yamlConfig.clientId ?? '',
-    clientSecret: process.env.client_secret ?? yamlConfig.clientSecret ?? '',
-    tenantId: process.env.tenant_id ?? yamlConfig.tenantId ?? '',
-    refreshToken: process.env.refresh_token ?? yamlConfig.refreshToken ?? '',
-    tenantClientId: process.env.tenant_client_id ?? yamlConfig.tenantClientId ?? '',
-    tokenEndpoint: process.env.token_endpoint ?? yamlConfig.tokenEndpoint ?? 'https://login.microsoftonline.com',
-    jwtSecret: process.env.jwt_secret ?? yamlConfig.jwtSecret ?? '',
-    internalJwtSecret: process.env.internal_jwt_secret ?? yamlConfig.internalJwtSecret ?? '',
-    authUsername: process.env.auth_username ?? yamlConfig.authUsername,
-    authPassword: process.env.auth_password ?? yamlConfig.authPassword,
-    
-    coreApiHost: yamlConfig.coreApiHost ?? '',
-    servicesPort: yamlConfig.servicesPort ?? '',
-    authUrl: yamlConfig.authUrl ?? '',
-    backendUrl: yamlConfig.backendUrl ?? '',
-    apiUrl: `${yamlConfig.coreApiHost}:${yamlConfig.servicesPort}${yamlConfig.backendUrl}`,
-    authFullUrl: `${yamlConfig.coreApiHost}:${yamlConfig.servicesPort}${yamlConfig.authUrl}`,
-    certPdfSignType: yamlConfig.certPdfSignType ?? 'p12',
-    certPdfSignPath: process.env.cert_pdf_sign_path ?? yamlConfig.certPdfSignPath ?? '',
-    certPdfSignPassword: process.env.cert_pdf_sign_password ?? yamlConfig.certPdfSignPassword ?? '',
-    
-    standalone_mode: false,
-    config_source: 'ENV_YAML'
-  };
-};
-
-/**
- * Main config loader
- */
-const loadConfig = async () => {
-  const useStandalone = shouldUseStandalone();
-  
-  if (useStandalone) {
-    return await loadStandaloneConfig();
-  } else {
-    return loadTraditionalConfig();
   }
 };
 
@@ -686,6 +437,23 @@ export const getInternalToken = (): string => {
   );
 };
 
+// src/config/paths.ts
+// config/paths.ts
+import path from 'path';
+
+/**
+ * Static paths configuration
+ * These paths are fixed and don't depend on client configuration
+ */
+export const paths = {
+  pdf: {
+    templatePath: path.resolve(__dirname, '../../../reports_templates/templates'),
+    cssPath: path.resolve(__dirname, '../../../reports_templates/css')
+  },
+  zpl: {
+    templatePath: path.resolve(__dirname, '../../../reports_templates/templates')
+  }
+};
 // src/controllers/authController.ts
 import { Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
@@ -1414,8 +1182,8 @@ router.get('/stats', async (req, res) => {
 });
 
 export default router;
-// src/scripts/dev.ts
-// scripts/dev.ts
+// src/scripts/start.ts
+// scripts/dev.ts - SIMPLIFIED VERSION
 import { execSync } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
@@ -1423,168 +1191,72 @@ import * as fs from "fs";
 // Parse arguments
 const args = process.argv.slice(2);
 const clientId = args.find(arg => !arg.startsWith('--'));
-const platformFlag = args.includes("--win") ? "--win" : args.includes("--linux") ? "--linux" : "";
-const shouldDecrypt = args.includes("--decrypt");
-const isStandalone = args.includes("--standalone");
 const gpgPassphraseArg = args.find(arg => arg.startsWith("--gpg-passphrase="));
 
 if (!clientId) {
-  console.error("❌ Missing CLIENT_ID. Usage: npm run dev -- core-dev [--win|--linux] [--decrypt] [--standalone] [--gpg-passphrase=xxx]");
+  console.error("❌ Missing CLIENT_ID. Usage: npm run dev -- core-dev [--gpg-passphrase=xxx]");
   process.exit(1);
 }
 
 console.log(`🚀 Starting Core Services for client: ${clientId}`);
-console.log(`🎯 Mode: ${isStandalone ? 'STANDALONE' : 'TRADITIONAL'}`);
+console.log(`🔐 Mode: SOPS ONLY`);
 
-// Determine effective platform
-const platform =
-  platformFlag === "--win"
-    ? "win"
-    : platformFlag === "--linux"
-    ? "linux"
-    : process.platform.startsWith("win")
-    ? "win"
-    : "linux";
+// Set environment variables
+process.env.CLIENT_ID = clientId;
 
-// 🚀 Smart detection for compiled vs TypeScript execution
-const isCompiled = __filename.endsWith('.js');
-console.log(`🔧 Execution mode: ${isCompiled ? 'COMPILED (JavaScript)' : 'DEVELOPMENT (TypeScript)'}`);
-
-/**
- * Handle Standalone Mode - No .env files required!
- */
-if (isStandalone) {
-  console.log("🔒 Standalone mode detected - bypassing .env file requirements");
-  
-  // Set environment variables for standalone mode
-  process.env.CONFIG_MODE = 'standalone';
-  process.env.CLIENT_ID = clientId;
-  
-  // Set GPG passphrase if provided
-  if (gpgPassphraseArg) {
-    const passphrase = gpgPassphraseArg.split('=')[1];
-    process.env.GPG_PASSPHRASE = passphrase;
-    console.log("🔑 GPG passphrase set from CLI argument");
-  }
-  
-  // Verify GPG setup before starting
-  console.log("🔍 Verifying GPG setup...");
-  try {
-    execSync('gpg --list-secret-keys', { stdio: 'pipe' });
-    console.log("✅ GPG keys available");
-  } catch (error) {
-    console.error("❌ GPG setup issue. Make sure GPG is installed and keys are imported.");
-    console.error("Run: gpg --list-secret-keys");
-    process.exit(1);
-  }
-  
-  // Verify SOPS is available
-  const sopsPath = path.resolve(__dirname, "../../../core-envs-private/tools/win64/sops.exe");
-  if (!fs.existsSync(sopsPath) && platform === "win") {
-    console.error(`❌ SOPS not found at: ${sopsPath}`);
-    console.error("Make sure core-envs-private repo is cloned and sops.exe is in tools/win64/");
-    process.exit(1);
-  }
-  
-  console.log("🚀 Starting application in standalone mode...");
-  
-  // 🎯 Smart app path resolution - works for both compiled and TypeScript
-  const appPath = isCompiled 
-    ? path.resolve(__dirname, "../app.js")   // Compiled version in dist/
-    : path.resolve(__dirname, "../app.ts");  // TypeScript version in src/
-  
-  const runCommand = isCompiled
-    ? `node "${appPath}" ${clientId} --standalone`
-    : `ts-node "${appPath}" ${clientId} --standalone`;
-  
-  console.log(`📂 App path: ${appPath}`);
-  console.log(`⚡ Run command: ${runCommand}`);
-  
-  try {
-    execSync(runCommand, { 
-      stdio: "inherit", 
-      shell: platform === "win" ? "cmd.exe" : "/bin/bash",
-      env: process.env // Pass all environment variables including GPG_PASSPHRASE
-    });
-  } catch (error) {
-    console.error("❌ Application failed to start in standalone mode");
-    process.exit(1);
-  }
-  
-  // Exit here - standalone mode is complete
-  process.exit(0);
+// Set GPG passphrase if provided
+if (gpgPassphraseArg) {
+  const passphrase = gpgPassphraseArg.split('=')[1];
+  process.env.GPG_PASSPHRASE = passphrase;
+  console.log("🔑 GPG passphrase set from CLI argument");
 }
 
-/**
- * Handle Traditional Mode - Original logic
- */
-console.log("📄 Traditional mode - using .env + YAML files");
-
-// Path to core-envs-private repo (assumed sibling of core-services)
-const envsRepo = path.resolve(__dirname, "../../../core-envs-private");
-
-// Path to the secrets file
-const secretsPath = path.join(envsRepo, "clients", clientId, "secrets.sops.yaml");
-
-// Output path for the generated .env file
-const envOutput = path.resolve(__dirname, "../.env");
-
-// SOPS binary path
-const sopsBinary =
-  platform === "win"
-    ? path.join(envsRepo, "tools", "win64", "sops.exe")
-    : "sops";
-
-if (!fs.existsSync(secretsPath)) {
-  console.error(`❌ secrets.sops.yaml not found at: ${secretsPath}`);
-  console.error(`💡 Available clients:`);
-  
-  // List available clients
-  const clientsDir = path.join(envsRepo, "clients");
-  if (fs.existsSync(clientsDir)) {
-    const availableClients = fs.readdirSync(clientsDir, { withFileTypes: true })
-      .filter(dirent => dirent.isDirectory())
-      .map(dirent => dirent.name);
-    
-    availableClients.forEach(client => console.error(`   - ${client}`));
-  }
-  
+// Verify GPG setup
+console.log("🔍 Verifying GPG setup...");
+try {
+  execSync('gpg --list-secret-keys', { stdio: 'pipe' });
+  console.log("✅ GPG keys available");
+} catch (error) {
+  console.error("❌ GPG setup issue. Make sure GPG is installed and keys are imported.");
+  console.error("Run: gpg --list-secret-keys");
   process.exit(1);
 }
 
-if (shouldDecrypt) {
-  try {
-    console.log(`🔐 Decrypting secrets for "${clientId}" using SOPS...`);
-    const command = `"${sopsBinary}" -d "${secretsPath}" > "${envOutput}"`;
-    execSync(command, {
-      stdio: "inherit",
-      shell: platform === "win" ? "cmd.exe" : "/bin/bash",
-    });
-    console.log(`✅ .env file generated at: ${envOutput}`);
-  } catch (error) {
-    console.error("❌ Failed to decrypt secrets with SOPS");
-    console.error("💡 Make sure:");
-    console.error("   1. GPG private key is imported: gpg --list-secret-keys");
-    console.error("   2. You have the correct passphrase");
-    console.error("   3. SOPS binary is available");
-    process.exit(1);
-  }
-} else {
-  if (!fs.existsSync(envOutput)) {
-    console.error(`❌ .env file not found at ${envOutput}. Use --decrypt to generate it.`);
-    console.error(`💡 Run: npm run dev -- ${clientId} --decrypt`);
-    process.exit(1);
-  }
-  console.log(`ℹ️ Using existing .env file at: ${envOutput}`);
+// Verify SOPS is available
+const sopsPath = path.resolve(__dirname, "../../../core-envs-private/tools/win64/sops.exe");
+if (!fs.existsSync(sopsPath) && process.platform.startsWith("win")) {
+  console.error(`❌ SOPS not found at: ${sopsPath}`);
+  console.error("Make sure core-envs-private repo is cloned and sops.exe is in tools/win64/");
+  process.exit(1);
 }
 
-// Start the application in traditional mode
-console.log("🚀 Starting application in traditional mode...");
+// Verify client configuration exists
+const envsPath = path.resolve(__dirname, "../../../core-envs-private/clients", clientId);
+const configPath = path.join(envsPath, 'config.yaml');
+const secretsPath = path.join(envsPath, 'secrets.sops.yaml');
 
-// 🎯 Smart app path resolution for traditional mode too
+if (!fs.existsSync(configPath)) {
+  console.error(`❌ Client config not found: ${configPath}`);
+  process.exit(1);
+}
+
+if (!fs.existsSync(secretsPath)) {
+  console.error(`❌ Client secrets not found: ${secretsPath}`);
+  process.exit(1);
+}
+
+console.log("✅ Client configuration verified");
+
+// Determine if we're running compiled or TypeScript
+const isCompiled = __filename.endsWith('.js');
+console.log(`🔧 Execution mode: ${isCompiled ? 'COMPILED (JavaScript)' : 'DEVELOPMENT (TypeScript)'}`);
+
+// Start the application
+console.log("🚀 Starting application...");
+
 const appPath = isCompiled 
-  ? path.resolve(__dirname, "../app.js")   // Compiled version
-  : path.resolve(__dirname, "../app.ts");  // TypeScript version
+  ? path.resolve(__dirname, "../app.js")   // Compiled version in dist/
+  : path.resolve(__dirname, "../app.ts");  // TypeScript version in src/
 
 const runCommand = isCompiled
   ? `node "${appPath}" ${clientId}`
@@ -1596,7 +1268,8 @@ console.log(`⚡ Run command: ${runCommand}`);
 try {
   execSync(runCommand, { 
     stdio: "inherit", 
-    shell: platform === "win" ? "cmd.exe" : "/bin/bash" 
+    shell: process.platform.startsWith("win") ? "cmd.exe" : "/bin/bash",
+    env: process.env // Pass all environment variables including GPG_PASSPHRASE
   });
 } catch (error) {
   console.error("❌ Application failed to start");
@@ -3046,7 +2719,7 @@ export function getCentralLoggingUrl(): string | null {
 import path from "path";
 import { promises as fs } from "fs";
 import { compileFile } from "pug";
-import { config } from "../../config/config";
+import { paths } from "../../config/paths";
 import { acquirePage, releasePage } from "../../config/browserPool";
 import { sendLog } from "../../services/logEmitter";
 import { v4 as uuidv4 } from "uuid";
@@ -3086,11 +2759,8 @@ export async function generatePDF(data: any): Promise<Buffer> {
     throw new Error("Missing core_report_info or report_template");
   }
 
-  const templatePath = path.join(
-    config.pdf.templatePath,
-    `${info.report_template}.pug`
-  );
-  const cssPath = path.join(config.pdf.cssPath, `${info.report_template}.css`);
+  const templatePath = path.join(paths.pdf.templatePath, `${info.report_template}.pug`);
+  const cssPath = path.join(paths.pdf.cssPath, `${info.report_template}.css`);
 
   let page: any = null;
   
@@ -3705,7 +3375,7 @@ export function getServiceContainer(): ServiceContainer {
 import fs from 'fs';
 import path from 'path';
 import mustache from 'mustache';
-import { config } from '../../config/config';
+import { paths } from "../../config/paths";
 import { v4 as uuidv4 } from 'uuid';
 import logger from '../../utils/logging';
 
@@ -3739,7 +3409,7 @@ export const generateZPL = async (data: any): Promise<string> => {
     throw new Error('Missing report_template in core_report_info');
   }
 
-  const templatePath = path.join(config.zpl.templatePath, `${templateName}.zpl`);
+  const templatePath = path.join(paths.zpl.templatePath, `${templateName}.zpl`);
   
   logger.zpl('Checking template file', {
     trace_id,
