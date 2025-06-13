@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import mustache from 'mustache';
-import { config } from '../../config/config';
+import { paths } from "../../config/paths";
 import { v4 as uuidv4 } from 'uuid';
 import logger from '../../utils/logging';
 
@@ -35,7 +35,7 @@ export const generateZPL = async (data: any): Promise<string> => {
     throw new Error('Missing report_template in core_report_info');
   }
 
-  const templatePath = path.join(config.zpl.templatePath, `${templateName}.zpl`);
+  const templatePath = path.join(paths.zpl.templatePath, `${templateName}.zpl`);
   
   logger.zpl('Checking template file', {
     trace_id,

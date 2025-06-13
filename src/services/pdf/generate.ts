@@ -1,7 +1,7 @@
 import path from "path";
 import { promises as fs } from "fs";
 import { compileFile } from "pug";
-import { config } from "../../config/config";
+import { paths } from "../../config/paths";
 import { acquirePage, releasePage } from "../../config/browserPool";
 import { sendLog } from "../../services/logEmitter";
 import { v4 as uuidv4 } from "uuid";
@@ -41,11 +41,8 @@ export async function generatePDF(data: any): Promise<Buffer> {
     throw new Error("Missing core_report_info or report_template");
   }
 
-  const templatePath = path.join(
-    config.pdf.templatePath,
-    `${info.report_template}.pug`
-  );
-  const cssPath = path.join(config.pdf.cssPath, `${info.report_template}.css`);
+  const templatePath = path.join(paths.pdf.templatePath, `${info.report_template}.pug`);
+  const cssPath = path.join(paths.pdf.cssPath, `${info.report_template}.css`);
 
   let page: any = null;
   
