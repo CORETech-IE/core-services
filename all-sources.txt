@@ -1,4 +1,4 @@
-// app.ts
+// src/app.ts
 import express from "express";
 import helmet from "helmet";
 import { getConfigAsync } from "./config/envConfig";
@@ -68,7 +68,7 @@ console.log("🔄 Listen called, waiting for server...");
 
 startApp().catch(console.error);
 
-// config/browserPool.ts
+// src/config/browserPool.ts
 import puppeteer, { Browser, Page } from 'puppeteer';
 import fs from 'fs';
 import os from 'os';
@@ -125,7 +125,7 @@ export async function closeAllBrowsers() {
   }
 }
 
-// config/config-validator.ts
+// src/config/config-validator.ts
 import logger from '../utils/logging';
 
 export function validateConfig(config: any): void {
@@ -199,7 +199,7 @@ export function validateConfig(config: any): void {
 
   console.log("✅ All required environment variables are present.");
 }
-// config/config.ts
+// src/config/config.ts
 import fs from 'fs';
 import path from 'path';
 import yaml from 'js-yaml';
@@ -273,334 +273,238 @@ export const config = {
   raw: clientConfig
 };
 
+// src/config/envConfig.ts
 // config/envConfig.ts
-// config/envConfig.ts
-import { execSync } from 'child_process';
+import { execSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import yaml from 'js-yaml';
 
-interface RetryConfig {
-  maxAttempts: number;
-  baseDelayMs: number;
-  maxDelayMs: number;
-}
-
-const DEFAULT_RETRY_CONFIG: RetryConfig = {
-  maxAttempts: 3,
-  baseDelayMs: 1000,
-  maxDelayMs: 10000
-};
-
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
 /**
- * Determines configuration mode based on environment and CLI args
+ * SOLUCIÓN DEFINITIVA para el problema GPG/SOPS en Windows
+ * Usa spawn en lugar de execSync para mejor herencia de entorno
  */
-const getConfigMode = (): 'standalone' | 'traditional' => {
-  if (process.argv.includes('--standalone')) return 'standalone';
-  if (process.env.CONFIG_MODE === 'standalone') return 'standalone';
+
+/**
+ * Get client ID from CLI args
+ */
+const getClientId = (): string => {
+  const cliArgs = process.argv.slice(2);
+  const cliClientId = cliArgs.find(arg => !arg.startsWith('--'));
   
-  // Auto-detection for Windows Service
-  if (process.platform === 'win32' && process.env.NODE_ENV === 'production') {
-    return 'standalone';
+  if (cliClientId) {
+    console.log(`🎯 Using CLIENT_ID: ${cliClientId}`);
+    return cliClientId;
   }
   
-  // Check for SOPS binary (platform-specific)
-  let hasSOPS = false;
-  if (process.platform === 'win32') {
-    hasSOPS = fs.existsSync(path.join(__dirname, '../../tools/win64/sops.exe'));
-  } else {
-    // Linux: check multiple locations
-    const linuxSopsPaths = [
-      path.join(__dirname, '../../tools/linux/sops'),
-      path.join(__dirname, '../../tools/sops'),
-      '/usr/local/bin/sops',
-      '/usr/bin/sops'
-    ];
-    hasSOPS = linuxSopsPaths.some(p => fs.existsSync(p));
-    
-    // Also check if sops is in PATH
-    if (!hasSOPS) {
-      try {
-        execSync('which sops', { stdio: 'pipe' });
-        hasSOPS = true;
-      } catch {
-        // sops not in PATH
-      }
-    }
+  if (process.env.CLIENT_ID) {
+    console.log(`🎯 Using CLIENT_ID from ENV: ${process.env.CLIENT_ID}`);
+    return process.env.CLIENT_ID;
   }
   
-  const hasEnv = fs.existsSync(path.join(__dirname, '../.env'));
-  
-  if (hasSOPS && !hasEnv) return 'standalone';
-  return 'traditional';
+  console.log(`🎯 Using default CLIENT_ID: core-dev`);
+  return 'core-dev';
 };
 
 /**
- * Get GPG passphrase from multiple sources with fallback
+ * Get GPG passphrase from CLI argument
  */
 const getGPGPassphrase = (): string => {
-  // 1. Environment variable (highest priority)
   if (process.env.GPG_PASSPHRASE) {
-    console.log('?? Using GPG passphrase from environment');
+    console.log('🔑 Using GPG passphrase from environment');
     return process.env.GPG_PASSPHRASE;
   }
   
-  // 2. CLI argument --gpg-passphrase
   const passphraseArg = process.argv.find(arg => arg.startsWith('--gpg-passphrase='));
   if (passphraseArg) {
-    console.log('?? Using GPG passphrase from CLI argument');
+    console.log('🔑 Using GPG passphrase from CLI argument');
     return passphraseArg.split('=')[1];
   }
   
-  // 3. Windows Service Registry (for production)
-  if (process.platform === 'win32' && process.env.NODE_ENV === 'production') {
-    try {
-      const regValue = execSync(
-        'reg query "HKLM\\SOFTWARE\\CoreServices" /v GPGPassphrase 2>nul', 
-        { encoding: 'utf8', timeout: 5000 }
-      );
-      const match = regValue.match(/GPGPassphrase\s+REG_SZ\s+(.+)/);
-      if (match) {
-        console.log('?? Using GPG passphrase from Windows Registry');
-        return match[1].trim();
-      }
-    } catch (error) {
-      console.warn('?? Could not read GPG passphrase from Windows Registry');
-    }
-  }
-  
-  // 4. File-based fallback (encrypted file in secure location)
-  const securePassphraseFile = path.join(process.cwd(), 'secure', 'gpg.key');
-  if (fs.existsSync(securePassphraseFile)) {
-    try {
-      const encryptedPassphrase = fs.readFileSync(securePassphraseFile, 'utf8').trim();
-      const passphrase = Buffer.from(encryptedPassphrase, 'base64').toString('utf8');
-      console.log('?? Using GPG passphrase from secure file');
-      return passphrase;
-    } catch (error) {
-      console.warn('?? Could not read GPG passphrase from secure file');
-    }
-  }
-  
-  throw new Error('GPG passphrase not found. Set GPG_PASSPHRASE environment variable or use --gpg-passphrase=xxx');
+  throw new Error('GPG passphrase not found. Use --gpg-passphrase=xxx');
 };
 
 /**
- * Get SOPS binary path based on platform
+ * Get SOPS binary path for Windows
  */
 const getSopsPath = (envsRepoPath: string): string => {
-  if (process.platform === 'win32') {
-    const winPath = path.join(envsRepoPath, 'tools/win64/sops.exe');
-    if (!fs.existsSync(winPath)) {
-      throw new Error(`SOPS Windows binary not found at: ${winPath}`);
-    }
-    return winPath;
-  } else {
-    // Linux/Unix - try multiple locations
-    const linuxPaths = [
-      path.join(envsRepoPath, 'tools/linux/sops'),
-      path.join(envsRepoPath, 'tools/sops'),
-      '/usr/local/bin/sops',
-      '/usr/bin/sops',
-      'sops' // PATH lookup
-    ];
-    
-    for (const sopsPath of linuxPaths) {
-      try {
-        if (sopsPath === 'sops') {
-          execSync('which sops', { stdio: 'pipe' });
-          console.log(`?? Using SOPS from PATH`);
-          return 'sops';
-        } else if (fs.existsSync(sopsPath)) {
-          // Make sure it's executable
-          try {
-            fs.chmodSync(sopsPath, 0o755);
-          } catch (chmodError) {
-            console.warn(`?? Could not set executable permissions on ${sopsPath}`);
-          }
-          console.log(`?? Using SOPS binary: ${sopsPath}`);
-          return sopsPath;
-        }
-      } catch (error) {
-        continue;
-      }
-    }
-    
-    throw new Error(`SOPS binary not found. Install with: curl -LO https://github.com/mozilla/sops/releases/download/v3.7.3/sops-v3.7.3.linux.amd64 && sudo mv sops-v3.7.3.linux.amd64 /usr/local/bin/sops && sudo chmod +x /usr/local/bin/sops`);
+  const winPath = path.join(envsRepoPath, 'tools/win64/sops.exe');
+  if (!fs.existsSync(winPath)) {
+    throw new Error(`SOPS Windows binary not found at: ${winPath}`);
   }
+  return winPath;
 };
 
 /**
- * Decrypt SOPS file with Windows-specific optimizations
+ * SOLUCIÓN DEFINITIVA: Usar spawn en lugar de execSync
+ * Esto permite mejor herencia del contexto GPG de PowerShell
  */
-const decryptSopsWindows = (sopsPath: string, secretsPath: string, gpgPassphrase: string): string => {
-  console.log('?? Windows SOPS decryption with optimizations...');
+const decryptSopsAsync = async (sopsPath: string, secretsPath: string, gpgPassphrase: string): Promise<string> => {
+  console.log('🚀 ASYNC SOPS decryption with spawn (herencia completa de entorno)...');
   
-  // Pre-cache GPG passphrase
-  try {
-    execSync(`echo test | gpg --sign --armor --batch --yes --passphrase "${gpgPassphrase}" --pinentry-mode loopback`, {
-      stdio: 'pipe',
-      timeout: 10000,
-      env: {
-        ...process.env,
-        GNUPGHOME: process.env.GNUPGHOME || path.join(os.homedir(), '.gnupg'),
-      }
-    });
-    console.log('? GPG passphrase cached successfully');
-  } catch (error) {
-    console.warn('?? GPG pre-cache failed:', (error as Error).message);
-  }
-  
-  // Execute SOPS
-  const decryptOutput = execSync(`"${sopsPath}" -d --output-type json "${secretsPath}"`, {
-    encoding: 'utf8',
-    timeout: 30000,
-    env: {
-      ...process.env,
-      GNUPGHOME: process.env.GNUPGHOME || path.join(os.homedir(), '.gnupg'),
-      GPG_PASSPHRASE: gpgPassphrase
-    },
-    stdio: ['pipe', 'pipe', 'pipe']
-  });
-  
-  console.log('? SOPS decryption successful (Windows)');
-  return decryptOutput;
-};
-
-/**
- * Decrypt SOPS file with Linux-specific optimizations (GPG POPUP KILLER)
- */
-const decryptSopsLinux = (sopsPath: string, secretsPath: string, gpgPassphrase: string): string => {
-  console.log('?? Linux SOPS decryption starting (killing GPG popups)...');
-  
-  try {
-    // Method 1: FORCE GPG to use our passphrase (NO POPUPS!)
-    const result = execSync(`"${sopsPath}" -d --output-type json "${secretsPath}"`, {
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        GPG_PASSPHRASE: gpgPassphrase,
-        GPG_TTY: '/dev/null',              // ? KILL TTY
-        DISPLAY: '',                       // ? KILL X11 POPUPS  
-        GPG_AGENT_INFO: '',               // ? DISABLE AGENT
-        GPG_BATCH: '1',                   // ? BATCH MODE
-        GNUPGHOME: process.env.GNUPGHOME || path.join(os.homedir(), '.gnupg')
-      },
+  return new Promise((resolve, reject) => {
+    // Preparar entorno - usar el mismo GNUPGHOME que PowerShell
+    const gnupgHome = process.env.GNUPGHOME || path.join(process.env.APPDATA!, 'gnupg');
+    
+    console.log('🔍 SOPS Environment:');
+    console.log('  SOPS Path:', sopsPath);
+    console.log('  Secrets Path:', secretsPath);
+    console.log('  GNUPGHOME:', gnupgHome);
+    
+    // Spawn SOPS con herencia COMPLETA del entorno
+    const sopsProcess = spawn(sopsPath, [
+      '-d', 
+      '--output-type', 
+      'json', 
+      secretsPath
+    ], {
       stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: 30000
+      env: { 
+        ...process.env,  // ← HEREDA TODO el contexto de PowerShell
+        GNUPGHOME: gnupgHome,
+        GPG_PASSPHRASE: gpgPassphrase,
+        // Variables adicionales para asegurar funcionamiento
+        GPG_TTY: process.platform === 'win32' ? undefined : '/dev/null',
+        GPG_BATCH: '1'
+      },
+      shell: true,  // ← IMPORTANTE en Windows
+      windowsHide: true
     });
-    
-    console.log('? SOPS decryption successful (Linux Method 1 - No popups)');
-    return result;
-    
-  } catch (error1) {
-    console.log('?? Method 1 failed, trying Method 2 (pipe passphrase)...');
-    
-    try {
-      // Method 2: Pipe passphrase directly + kill all interactive stuff
-      const result = execSync(`echo "${gpgPassphrase}" | "${sopsPath}" -d --output-type json "${secretsPath}"`, {
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          GPG_BATCH: '1',
-          GPG_USE_AGENT: '0',              // ? NO AGENT
-          GPG_TTY: '/dev/null',            // ? NO TTY
-          DISPLAY: '',                     // ? NO X11
-          GNUPGHOME: process.env.GNUPGHOME || path.join(os.homedir(), '.gnupg')
-        },
-        stdio: ['pipe', 'pipe', 'pipe'],
-        timeout: 30000,
-        shell: '/bin/bash'
-      });
-      
-      console.log('? SOPS decryption successful (Linux Method 2 - Piped passphrase)');
-      return result;
-      
-    } catch (error2) {
-      console.log('?? Method 2 failed, trying Method 3 (hardcore script)...');
-      
-      try {
-        // Method 3: Nuclear option - script with ALL GPG popup killers
-        const tempScript = path.join(os.tmpdir(), `decrypt-${Date.now()}.sh`);
-        const scriptContent = `#!/bin/bash
-# NUCLEAR GPG POPUP KILLER SCRIPT
-export GNUPGHOME="${process.env.GNUPGHOME || path.join(os.homedir(), '.gnupg')}"
-export GPG_BATCH=1
-export GPG_USE_AGENT=0
-export GPG_TTY=/dev/null
-export DISPLAY=""
-export GPG_AGENT_INFO=""
-unset SSH_AGENT_PID
-unset SSH_AUTH_SOCK
-# Pre-load passphrase into gpg-agent cache
-echo "test" | gpg --batch --yes --passphrase "${gpgPassphrase}" --pinentry-mode loopback --symmetric --cipher-algo AES256 --output /dev/null 2>/dev/null || true
-# Now decrypt with SOPS
-echo "${gpgPassphrase}" | "${sopsPath}" -d --output-type json "${secretsPath}"`;
+
+    let stdout = '';
+    let stderr = '';
+
+    sopsProcess.stdout?.on('data', (data) => {
+      stdout += data.toString();
+    });
+
+    sopsProcess.stderr?.on('data', (data) => {
+      stderr += data.toString();
+    });
+
+    sopsProcess.on('close', (code) => {
+      if (code === 0) {
+        console.log('✅ SOPS decryption successful with spawn!');
+        resolve(stdout);
+      } else {
+        console.log('❌ SOPS spawn failed with code:', code);
+        console.log('❌ STDERR:', stderr);
         
-        fs.writeFileSync(tempScript, scriptContent, { mode: 0o755 });
+        // FALLBACK: Si spawn falla, intentar método directo con PowerShell
+        console.log('🔄 Trying PowerShell fallback...');
         
-        const result = execSync(`bash "${tempScript}"`, {
-          encoding: 'utf8',
-          env: {
-            ...process.env,
-            GPG_BATCH: '1',
-            GPG_USE_AGENT: '0',
-            GPG_TTY: '/dev/null',
-            DISPLAY: ''
-          },
-          stdio: ['pipe', 'pipe', 'pipe'],
-          timeout: 30000
-        });
-        
-        // Clean up immediately
-        fs.unlinkSync(tempScript);
-        
-        console.log('? SOPS decryption successful (Linux Method 3 - Nuclear option)');
-        return result;
-        
-      } catch (error3) {
-        // Clean up script if it exists
-        const tempScript = path.join(os.tmpdir(), `decrypt-${Date.now()}.sh`);
-        if (fs.existsSync(tempScript)) {
-          fs.unlinkSync(tempScript);
+        try {
+          // MÉTODO 1: Test super básico de PowerShell
+          console.log('🔬 Testing basic PowerShell functionality...');
+          
+          const basicTest = execSync('powershell -NoProfile -Command "Write-Host BASIC_TEST_OK"', {
+            encoding: 'utf8',
+            timeout: 10000
+          });
+          
+          console.log('✅ Basic PowerShell test result:', basicTest.trim());
+          
+          // MÉTODO 2: Test GPG directamente desde cmd (no PowerShell)
+          console.log('🔬 Testing GPG from CMD directly...');
+          
+          const cmdGpgTest = execSync(`gpg --list-secret-keys --keyid-format LONG`, {
+            encoding: 'utf8',
+            timeout: 10000,
+            env: {
+              ...process.env,
+              GNUPGHOME: gnupgHome
+            }
+          });
+          
+          const hasNewKey = cmdGpgTest.includes('84F09B1D810A6590');
+          const hasNewFingerprint = cmdGpgTest.includes('EC5A8F24358F986C983BA5F384F09B1D810A6590');
+          
+          console.log('🔍 CMD GPG Results:');
+          console.log('  - Contains new key (84F09B1D...):', hasNewKey);
+          console.log('  - Contains new fingerprint (EC5A8F24...):', hasNewFingerprint);
+          console.log('  - GPG output length:', cmdGpgTest.length);
+          
+          if (!hasNewKey && !hasNewFingerprint) {
+            console.log('❌ CMD GPG test shows keys are missing!');
+            console.log('📝 Available keys:', cmdGpgTest.split('\n').slice(0, 5).join('\n'));
+            reject(new Error('Secret keys not visible even from CMD'));
+            return;
+          }
+          
+          // MÉTODO 3: Test SOPS directamente desde cmd
+          console.log('🔬 Testing SOPS from CMD directly...');
+          
+          const cmdSopsResult = execSync(`"${sopsPath}" -d --output-type json "${secretsPath}"`, {
+            encoding: 'utf8',
+            timeout: 30000,
+            env: {
+              ...process.env,
+              GNUPGHOME: gnupgHome,
+              GPG_PASSPHRASE: gpgPassphrase
+            }
+          });
+          
+          console.log('✅ CMD SOPS worked! JSON length:', cmdSopsResult.length);
+          resolve(cmdSopsResult);
+          
+        } catch (psError) {
+          console.log('❌ ALL methods failed:', (psError as Error).message);
+          
+          // MÉTODO FINAL: Debug del error específico
+          if ((psError as any).stderr) {
+            console.log('📝 Error STDERR:', (psError as any).stderr);
+          }
+          
+          reject(new Error(`All SOPS methods failed: ${(psError as Error).message}`));
         }
-        
-        console.error('? All SOPS decryption methods failed on Linux (even the nuclear option):');
-        console.error('   Method 1 (env):', (error1 as Error).message.substring(0, 200));
-        console.error('   Method 2 (echo):', (error2 as Error).message.substring(0, 200));
-        console.error('   Method 3 (nuclear):', (error3 as Error).message.substring(0, 200));
-        console.error('?? Try running: gpgconf --kill gpg-agent && gpg-agent --daemon');
-        
-        throw new Error('SOPS decryption failed with all methods on Linux. GPG is being stubborn.');
       }
-    }
-  }
+    });
+
+    sopsProcess.on('error', (error) => {
+      console.log('❌ SOPS spawn error:', error.message);
+      reject(error);
+    });
+  });
 };
 
 /**
- * Standalone config loading with cross-platform SOPS support
+ * Determine if we should use standalone mode
+ */
+const shouldUseStandalone = (): boolean => {
+  if (process.argv.includes('--standalone')) return true;
+  if (process.env.CONFIG_MODE === 'standalone') return true;
+  
+  // Check if SOPS binary exists
+  const envsRepoPath = path.resolve(__dirname, '../../../core-envs-private');
+  const sopsPath = path.join(envsRepoPath, 'tools/win64/sops.exe');
+  const hasSOPS = fs.existsSync(sopsPath);
+  
+  // Check if .env exists
+  const hasEnv = fs.existsSync(path.join(__dirname, '../.env'));
+  
+  return hasSOPS && !hasEnv;
+};
+
+/**
+ * Load config in standalone mode (SOPS)
  */
 const loadStandaloneConfig = async () => {
-  console.log('?? Loading config via SOPS from local repo (Standalone Mode)');
+  console.log('🔧 Loading config via SOPS (Standalone Mode)');
   
   const clientId = getClientId();
   const gpgPassphrase = getGPGPassphrase();
   
-  // Use local core-envs-private repo (sibling directory)
   const envsRepoPath = path.resolve(__dirname, '../../../core-envs-private');
   
   if (!fs.existsSync(envsRepoPath)) {
     throw new Error(`core-envs-private repo not found at: ${envsRepoPath}`);
   }
   
-  console.log(`?? Using local repo: ${envsRepoPath}`);
-  console.log(`??? Platform: ${process.platform}`);
+  console.log(`📂 Using repo: ${envsRepoPath}`);
   
   try {
-    // 1. Load config.yaml (non-encrypted)
+    // 1. Load config.yaml
     const yamlPath = path.join(envsRepoPath, `clients/${clientId}/config.yaml`);
     if (!fs.existsSync(yamlPath)) {
       throw new Error(`Client config.yaml not found: ${clientId}`);
@@ -615,36 +519,30 @@ const loadStandaloneConfig = async () => {
       return acc;
     }, {} as Record<string, any>);
     
-    console.log('? config.yaml loaded successfully');
+    console.log('✅ config.yaml loaded');
     
-    // 2. Load and decrypt secrets.sops.yaml IN MEMORY
+    // 2. Decrypt secrets.sops.yaml
     const secretsPath = path.join(envsRepoPath, `clients/${clientId}/secrets.sops.yaml`);
     if (!fs.existsSync(secretsPath)) {
       throw new Error(`Client secrets.sops.yaml not found: ${clientId}`);
     }
     
-    console.log(`?? Decrypting secrets for client: ${clientId} (${process.platform})`);
+    console.log(`🔐 Decrypting secrets for: ${clientId}`);
     
-    // Get platform-specific SOPS path
     const sopsPath = getSopsPath(envsRepoPath);
-    console.log(`?? Using SOPS binary: ${sopsPath}`);
+    console.log(`🔧 Using SOPS: ${sopsPath}`);
     
-    // Decrypt using platform-specific method
-    let decryptOutput: string;
-    if (process.platform === 'win32') {
-      decryptOutput = decryptSopsWindows(sopsPath, secretsPath, gpgPassphrase);
-    } else {
-      decryptOutput = decryptSopsLinux(sopsPath, secretsPath, gpgPassphrase);
-    }
+    // ✅ USAR ASYNC SPAWN en lugar de execSync
+    const decryptOutput = await decryptSopsAsync(sopsPath, secretsPath, gpgPassphrase);
     
     const secretsConfig = JSON.parse(decryptOutput);
-    console.log('? Secrets decrypted successfully in memory');
+    console.log('✅ Secrets decrypted successfully');
     
-    // 3. Merge configs (secrets override yaml)
+    // 3. Merge configs
     const mergedConfig = {
       ...yamlConfig,
       ...secretsConfig,
-      // Map snake_case to camelCase
+      // Map snake_case to camelCase for key fields
       senderEmail: secretsConfig.sender_email ?? yamlConfig.senderEmail ?? '',
       clientId: secretsConfig.client_id ?? yamlConfig.clientId ?? '',
       clientSecret: secretsConfig.client_secret ?? yamlConfig.clientSecret ?? '',
@@ -657,7 +555,7 @@ const loadStandaloneConfig = async () => {
       authUsername: secretsConfig.auth_username ?? yamlConfig.authUsername,
       authPassword: secretsConfig.auth_password ?? yamlConfig.authPassword,
       
-      // Composed URLs
+      // URLs
       coreApiHost: yamlConfig.coreApiHost ?? '',
       servicesPort: yamlConfig.servicesPort ?? '',
       authUrl: yamlConfig.authUrl ?? '',
@@ -665,36 +563,34 @@ const loadStandaloneConfig = async () => {
       apiUrl: `${yamlConfig.coreApiHost}:${yamlConfig.servicesPort}${yamlConfig.backendUrl}`,
       authFullUrl: `${yamlConfig.coreApiHost}:${yamlConfig.servicesPort}${yamlConfig.authUrl}`,
       
-      // Certificate config
+      // Certificates
       certPdfSignType: yamlConfig.certPdfSignType ?? 'p12',
       certPdfSignPath: secretsConfig.cert_pdf_sign_path ?? yamlConfig.certPdfSignPath ?? '',
       certPdfSignPassword: secretsConfig.cert_pdf_sign_password ?? yamlConfig.certPdfSignPassword ?? '',
       
-      // Mark as standalone mode
+      // Metadata
       standalone_mode: true,
-      config_source: `SOPS_LOCAL_${process.platform.toUpperCase()}`
+      config_source: 'SOPS_STANDALONE'
     };
     
-    console.log(`? Config loaded successfully in standalone mode (${process.platform})`);
-    console.log('?? All secrets loaded in memory - no plaintext files created');
+    console.log('✅ Config loaded successfully in standalone mode');
     
     return mergedConfig;
     
   } catch (error) {
-    console.error(`? Standalone config loading failed on ${process.platform}:`, (error as Error).message);
+    console.error('❌ Standalone config loading failed:', (error as Error).message);
     throw error;
   }
 };
 
 /**
- * Traditional mode (unchanged)
+ * Load config in traditional mode (.env + YAML)
  */
 const loadTraditionalConfig = () => {
-  console.log('?? Loading config via .env + YAML (traditional mode)');
+  console.log('🔧 Loading config via .env + YAML (Traditional Mode)');
   
   const envPath = path.resolve(__dirname, '../.env');
   if (fs.existsSync(envPath)) {
-    // Read .env manually to avoid dotenv dependency in standalone
     const envContent = fs.readFileSync(envPath, 'utf8');
     const envVars = envContent
       .split('\n')
@@ -702,15 +598,14 @@ const loadTraditionalConfig = () => {
       .reduce((acc, line) => {
         const [key, ...valueParts] = line.split('=');
         const value = valueParts.join('=').trim();
-        acc[key.trim()] = value.replace(/^["']|["']$/g, ''); // Remove quotes
+        acc[key.trim()] = value.replace(/^["']|["']$/g, '');
         return acc;
       }, {} as Record<string, string>);
     
-    // Set environment variables
     Object.assign(process.env, envVars);
-    console.log(`? Loaded .env from: ${envPath}`);
+    console.log(`✅ Loaded .env from: ${envPath}`);
   } else {
-    console.warn(`?? .env not found at: ${envPath}`);
+    console.warn(`⚠️ .env not found at: ${envPath}`);
   }
 
   const clientId = getClientId();
@@ -727,9 +622,9 @@ const loadTraditionalConfig = () => {
       return acc;
     }, {} as Record<string, any>);
     
-    console.log(`? Loaded config.yaml from: ${yamlPath}`);
+    console.log(`✅ Loaded config.yaml from: ${yamlPath}`);
   } catch (err) {
-    console.warn(`?? Failed to load config.yaml at ${yamlPath}:`, err);
+    console.warn(`⚠️ Failed to load config.yaml:`, err);
   }
 
   return {
@@ -765,67 +660,20 @@ const loadTraditionalConfig = () => {
  * Main config loader
  */
 const loadConfig = async () => {
-  const mode = getConfigMode();
+  const useStandalone = shouldUseStandalone();
   
-  switch (mode) {
-    case 'standalone':
-      return await loadStandaloneConfig();
-    case 'traditional':
-      return loadTraditionalConfig();
-    default:
-      throw new Error(`Unknown config mode: ${mode}`);
+  if (useStandalone) {
+    return await loadStandaloneConfig();
+  } else {
+    return loadTraditionalConfig();
   }
 };
 
-/**
- * Get client ID from multiple sources
- */
-const getClientId = (): string => {
-  // 1. CLI argument
-  const cliArgs = process.argv.slice(2);
-  const cliClientId = cliArgs.find(arg => !arg.startsWith('--'));
-  
-  if (cliClientId) {
-    console.log(`?? Using CLIENT_ID from CLI: ${cliClientId}`);
-    return cliClientId;
-  }
-  
-  // 2. Environment variable
-  if (process.env.CLIENT_ID) {
-    console.log(`?? Using CLIENT_ID from ENV: ${process.env.CLIENT_ID}`);
-    return process.env.CLIENT_ID;
-  }
-  
-  // 3. Windows Registry (Windows Service only)
-  if (process.platform === 'win32' && process.env.NODE_ENV === 'production') {
-    try {
-      const regValue = execSync(
-        'reg query "HKLM\\SOFTWARE\\CoreServices" /v ClientID 2>nul', 
-        { encoding: 'utf8', timeout: 5000 }
-      );
-      const match = regValue.match(/ClientID\s+REG_SZ\s+(.+)/);
-      if (match) {
-        const clientId = match[1].trim();
-        console.log(`?? Using CLIENT_ID from Windows Registry: ${clientId}`);
-        return clientId;
-      }
-    } catch (error) {
-      console.warn('?? Could not read CLIENT_ID from Windows Registry');
-    }
-  }
-  
-  // 4. Default fallback
-  console.log(`?? Using default CLIENT_ID: core-dev`);
-  return 'core-dev';
-};
-
-// Export async config loader
+// Exports
 export const getConfig = loadConfig;
 export const getConfigAsync = loadConfig;
-
-// No sync initialization for standalone mode
 export default null;
-// config/internalToken.ts
+// src/config/internalToken.ts
 import jwt from 'jsonwebtoken';
 
 const SECRET = process.env.JWT_SECRET || 'default_secret_dangerous';
@@ -838,7 +686,7 @@ export const getInternalToken = (): string => {
   );
 };
 
-// controllers/authController.ts
+// src/controllers/authController.ts
 import { Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
@@ -891,7 +739,7 @@ export const login = async (req: Request, res: Response) => {
     return res.status(500).json({ error: 'Failed to generate authentication token' });
   }
 };
-// controllers/email/abacSend.ts
+// src/controllers/email/abacSend.ts
 // src/controllers/email/abacSend.ts
 
 import { Request, Response, NextFunction } from "express";
@@ -1222,7 +1070,7 @@ async function createPayloadWithSignedPDFs(
   };
 }
 
-// middlewares/allowGetPostOnly.ts
+// src/middlewares/allowGetPostOnly.ts
 import { Request, Response, NextFunction } from 'express';
 
 export function allowGetPostOnly(req: Request, res: Response, next: NextFunction) {
@@ -1232,7 +1080,7 @@ export function allowGetPostOnly(req: Request, res: Response, next: NextFunction
   next();
 }
 
-// middlewares/authenticateJWT.ts
+// src/middlewares/authenticateJWT.ts
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 
@@ -1259,7 +1107,7 @@ export function createAuthenticateJWT(jwtSecret: string) {
     }
   };
 }
-// middlewares/authorizeAdmin.ts
+// src/middlewares/authorizeAdmin.ts
 import { Request, Response, NextFunction } from 'express';
 
 export function authorizeAdmin(req: Request, res: Response, next: NextFunction) {
@@ -1270,7 +1118,7 @@ export function authorizeAdmin(req: Request, res: Response, next: NextFunction) 
   next();
 }
 
-// middlewares/errorHandler.ts
+// src/middlewares/errorHandler.ts
 import { Request, Response, NextFunction } from 'express';
 
 export function errorHandler(err: any, req: Request, res: Response, next: NextFunction) {
@@ -1278,7 +1126,7 @@ export function errorHandler(err: any, req: Request, res: Response, next: NextFu
   res.status(500).json({ error: 'Internal server error' });
 }
 
-// middlewares/index.ts
+// src/middlewares/index.ts
 export { traceId } from './traceId';
 export { validateToken } from './validateToken';
 export { rateLimiter } from './rateLimiter';
@@ -1288,7 +1136,7 @@ export { errorHandler } from './errorHandler';
 export { allowGetPostOnly } from './allowGetPostOnly';
 export { createAuthenticateJWT } from './authenticateJWT';
 export { authorizeAdmin } from './authorizeAdmin';
-// middlewares/rateLimiter.ts
+// src/middlewares/rateLimiter.ts
 import rateLimit from 'express-rate-limit';
 
 export const rateLimiter = rateLimit({
@@ -1298,7 +1146,7 @@ export const rateLimiter = rateLimit({
   legacyHeaders: false
 });
 
-// middlewares/securityHeaders.ts
+// src/middlewares/securityHeaders.ts
 import { Request, Response, NextFunction } from 'express';
 
 export function securityHeaders(req: Request, res: Response, next: NextFunction) {
@@ -1309,7 +1157,7 @@ export function securityHeaders(req: Request, res: Response, next: NextFunction)
   next();
 }
 
-// middlewares/traceId.ts
+// src/middlewares/traceId.ts
 import { Request, Response, NextFunction } from 'express';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -1321,7 +1169,7 @@ export function traceId(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
-// middlewares/validateBody.ts
+// src/middlewares/validateBody.ts
 import { Request, Response, NextFunction } from 'express';
 import { ZodSchema } from 'zod';
 
@@ -1335,7 +1183,7 @@ export function validateBody(schema: ZodSchema) {
   };
 }
 
-// middlewares/validateToken.ts
+// src/middlewares/validateToken.ts
 import { Request, Response, NextFunction } from 'express';
 import { getInternalToken } from '../config/internalToken';
 
@@ -1350,7 +1198,7 @@ export function validateToken(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
-// routes/authRoutes.ts
+// src/routes/authRoutes.ts
 import express from 'express';
 import { login } from '../controllers/authController';
 
@@ -1360,7 +1208,7 @@ router.post('/login', login);
 
 export default router;
 
-// routes/gdprRoutes.ts
+// src/routes/gdprRoutes.ts
 // routes/gdprRoutes.ts
 
 import express from 'express';
@@ -1566,7 +1414,7 @@ router.get('/stats', async (req, res) => {
 });
 
 export default router;
-// scripts/dev.ts
+// src/scripts/dev.ts
 // scripts/dev.ts
 import { execSync } from "child_process";
 import * as path from "path";
@@ -1754,7 +1602,7 @@ try {
   console.error("❌ Application failed to start");
   process.exit(1);
 }
-// services/email/emailService.ts
+// src/services/email/emailService.ts
 // src/services/email/emailService.ts
 
 import axios from 'axios';
@@ -2224,7 +2072,7 @@ function getContentType(filename: string): string {
       return 'application/octet-stream';
   }
 }
-// services/email/emailServiceHelpers.ts
+// src/services/email/emailServiceHelpers.ts
 // src/services/email/emailServiceHelpers.ts
 
 import { sendEmail, EmailParams } from './emailService';
@@ -2248,7 +2096,7 @@ export async function sendEmailWithConfig(
  * Export for easy importing
  */
 export { EmailParams, EmailAttachment } from './emailService';
-// services/email/internalRoutes.ts
+// src/services/email/internalRoutes.ts
 import express from 'express';
 import { sendEmailWithConfig } from './emailServiceHelpers';
 import { createAuthenticateJWT, authorizeAdmin } from '../../middlewares';
@@ -2287,7 +2135,7 @@ router.post(
 );
 
 export default router;
-// services/email/pdfSigningService.ts
+// src/services/email/pdfSigningService.ts
 // src/services/pdfSigningService.ts
 
 import { signPDF } from '../../utils/pdfSigner';
@@ -2508,7 +2356,7 @@ export function validateSigningResults(
     all_signed: true
   });
 }
-// services/email/publicRoutes.ts
+// src/services/email/publicRoutes.ts
 // src/services/email/publicRoutes.ts
 import express from 'express';
 import { abacSend } from '../../controllers/email/abacSend';
@@ -2599,7 +2447,7 @@ router.post('/send-internal', async (req, res) => {
 }); 
 
 export default router;
-// services/email/tokenService.ts
+// src/services/email/tokenService.ts
 import axios from 'axios';
 import qs from 'querystring';
 
@@ -2647,7 +2495,7 @@ export async function getAccessToken(config: TokenServiceConfig): Promise<string
   console.log('[core-services] OAuth token acquired from Microsoft Graph');
   return access_token;
 }
-// services/gdpr/gdprTokenService.ts
+// src/services/gdpr/gdprTokenService.ts
 // services/gdpr/gdprTokenService.ts
 
 import crypto from 'crypto';
@@ -3023,7 +2871,7 @@ export function initGDPRService(): GDPRTokenService {
   });
   return gdprService;
 } 
-// services/logEmitter.ts
+// src/services/logEmitter.ts
 import axios from "axios";
 import { getServiceContainer } from "./serviceContainer";
 import { getAuthToken } from "../utils/getToken";
@@ -3194,7 +3042,7 @@ export function getCentralLoggingUrl(): string | null {
   // TODO: Implement when API URL configuration is added to ServiceContainer
   return null;
 }
-// services/pdf/generate.ts
+// src/services/pdf/generate.ts
 import path from "path";
 import { promises as fs } from "fs";
 import { compileFile } from "pug";
@@ -3352,7 +3200,7 @@ export async function generatePDF(data: any): Promise<Buffer> {
     }
   }
 }
-// services/pdf/routes.ts
+// src/services/pdf/routes.ts
 import express from 'express';
 import { generatePDF } from './generate';
 import { pdfRequestSchema } from '../../validators/pdfRequestSchema';
@@ -3387,7 +3235,7 @@ router.post('/', validateBody(pdfRequestSchema), async (req, res, next) => {
 
 export default router;
 
-// services/pdp-production.ts
+// src/services/pdp-production.ts
 // services/pdp-production.ts
 
 import { getGDPRService, GDPRValidationRequest } from './gdpr/gdprTokenService';
@@ -3494,7 +3342,7 @@ export const evaluatePolicy = (attributes: PDPAttributes): PDPDecision => {
   };
   */
 };
-// services/pdp.ts
+// src/services/pdp.ts
 import crypto from 'crypto';
 
 /**
@@ -3619,7 +3467,7 @@ export const evaluatePolicy = (attributes: PDPAttributes): PDPDecision => {
     reason: `Consent valid and policy conditions met (${hashType} payload hash)` 
   };
 };
-// services/pep.ts
+// src/services/pep.ts
 // src/services/pep.ts
 //import { evaluatePolicy, PDPAttributes } from './pdp';
 import { evaluatePolicy, PDPAttributes } from './pdp-production';
@@ -3739,7 +3587,7 @@ function sortObjectRecursively(obj: any): any {
   }
   return obj;
 }
-// services/serviceContainer.ts
+// src/services/serviceContainer.ts
 // src/services/serviceContainer.ts
 import { EmailServiceConfig } from './email/emailService';
 import { TokenServiceConfig } from './email/tokenService';
@@ -3853,7 +3701,7 @@ export function getServiceContainer(): ServiceContainer {
   }
   return serviceContainer;
 }
-// services/zpl/generate.ts
+// src/services/zpl/generate.ts
 import fs from 'fs';
 import path from 'path';
 import mustache from 'mustache';
@@ -3980,7 +3828,7 @@ export const generateZPL = async (data: any): Promise<string> => {
     throw error;
   }
 };
-// services/zpl/routes.ts
+// src/services/zpl/routes.ts
 import express from 'express';
 import { generateZPL } from './generate';
 import { zplRequestSchema } from '../../validators/zplRequestSchema';
@@ -4012,7 +3860,7 @@ router.post('/', validateBody(zplRequestSchema), async (req, res, next) => {
 
 export default router;
 
-// types/iso27001.ts
+// src/types/iso27001.ts
 // src/types/iso27001.ts
 
 /**
@@ -4067,7 +3915,7 @@ export const getSecurityControls = (classification: ISO27001Classification): ISO
       throw new Error(`Invalid ISO 27001 classification: ${classification}`);
   }
 };
-// types/pdfTypes.ts
+// src/types/pdfTypes.ts
 // src/types/pdfTypes.ts
 
 export interface PdfSigningConfig {
@@ -4075,7 +3923,7 @@ export interface PdfSigningConfig {
     certPdfSignPassword: string;
     certPdfSignType: 'p12' | 'pem';
   }
-// utils/emailHashTest.ts
+// src/utils/emailHashTest.ts
 // utils/emailHashTest.ts
 
 import { createHash } from 'crypto';
@@ -4110,7 +3958,7 @@ const payload = {
 const hash = createHash('sha256').update(canonical).digest('hex');
 console.log(hash);
 
-// utils/getToken.ts
+// src/utils/getToken.ts
 import axios from "axios";
 import { getServiceContainer } from "../services/serviceContainer";
 import logger from "./logging";
@@ -4261,7 +4109,7 @@ export async function getAuthToken(): Promise<string> {
     throw new Error("Authentication failed");
   }
 }
-// utils/hashUtils.ts
+// src/utils/hashUtils.ts
 // utils/hashUtils.ts
 
 import { createHash } from 'crypto';
@@ -4299,7 +4147,7 @@ export function generatePayloadHash(payload: any): string {
   const canonicalJson = JSON.stringify(sortObjectRecursively(payload));
   return createHash('sha256').update(canonicalJson).digest('hex');
 }
-// utils/logging/core/config.ts
+// src/utils/logging/core/config.ts
 /**
  * 🔧 CORE-SERVICES: Logger Configuration
  * 
@@ -4488,7 +4336,7 @@ export const getDefaultMeta = (config: LoggerConfig) => {
     mode: config.mode
   };
 };
-// utils/logging/core/logger.ts
+// src/utils/logging/core/logger.ts
 /**
  * 🔧 CORE-SERVICES: Core Logger
  * 
@@ -4668,7 +4516,7 @@ export class CoreServicesLogger implements ICoreServicesLogger {
     return this.logger;
   }
 }
-// utils/logging/core/types.ts
+// src/utils/logging/core/types.ts
 /**
  * 🔧 CORE-SERVICES: Logger Types
  * 
@@ -4908,7 +4756,7 @@ export interface IEnhancedLogger extends ICoreServicesLogger {
   getDailySummary(): string;
   getCurrentDailyStats(): DailyStats;
 }
-// utils/logging/formatter/humanMetrics.ts
+// src/utils/logging/formatter/humanMetrics.ts
 /**
  * 🧠 CORE-SERVICES: Human-Friendly Metrics Formatter
  * 
@@ -5041,7 +4889,7 @@ export function createConsoleMetrics(metrics: SystemMetrics): string {
   
   return `${memEmoji} Memory: ${memUsed}/${memTotal} (${memUsage.toFixed(1)}%) | ${cpuEmoji} CPU: ${formatCpuPercent(cpuPercent)} | ⏰ Uptime: ${uptime}`;
 }
-// utils/logging/index.ts
+// src/utils/logging/index.ts
 /**
  * 🚀 CORE-SERVICES: Logger System
  * 
@@ -5577,7 +5425,7 @@ export default logger;
 
 // Export the enhanced logger class for direct instantiation
 export { TempEnhancedLogger as EnhancedCoreServicesLogger };
-// utils/pdfSigner.ts
+// src/utils/pdfSigner.ts
 import fs from 'fs';
 import { plainAddPlaceholder } from 'node-signpdf';
 
@@ -5647,7 +5495,7 @@ export async function signPDF({
 
   throw new Error('Unsupported certificate type');
 }
-// utils/windowsGpgFix.ts
+// src/utils/windowsGpgFix.ts
 // utils/windowsGpgFix.ts
 import { execSync } from 'child_process';
 import fs from 'fs';
@@ -5661,7 +5509,7 @@ import os from 'os';
 export class WindowsGpgFix {
   
   // Updated fingerprint for new GPG key
-  private static readonly REQUIRED_GPG_KEY = 'E0E53EE33278112154BB63B2B02223CF086064AE';
+  private static readonly REQUIRED_GPG_KEY = 'EC5A8F24358F986C983BA5F384F09B1D810A6590';
   
   /**
    * Setup GPG environment for Windows
@@ -5871,7 +5719,7 @@ export function decryptSopsWithWindowsFix(sopsPath: string, secretsPath: string,
   // Decrypt using Windows-optimized methods
   return WindowsGpgFix.decryptSopsFile(sopsPath, secretsPath, passphrase);
 }
-// validators/iso27001EmailSchema.ts
+// src/validators/iso27001EmailSchema.ts
 // src/validators/iso27001EmailSchema.ts
 
 import { z } from 'zod';
@@ -5978,7 +5826,7 @@ export const validateISO27001EmailMiddleware = (req: any, res: any, next: any) =
   req.validatedBody = result.data;
   next();
 };
-// validators/pdfRequestSchema.ts
+// src/validators/pdfRequestSchema.ts
 import { z } from 'zod';
 
 // Define the structure of core_report_info
@@ -5997,7 +5845,7 @@ export const pdfRequestSchema = z.object({
   core_report_info: coreReportInfoSchema
 }).passthrough(); // allow additional properties
 
-// validators/zplRequestSchema.ts
+// src/validators/zplRequestSchema.ts
 import { z } from 'zod';
 
 // Define the structure of core_report_info
@@ -6018,3 +5866,513 @@ export const zplRequestSchema = z.object({
 
 
 
+// src/config/users.json
+{
+    "admin": {
+      "password": "$2a$12$XovTOF4pkAY7RgW2VabJceEgNQPk.TjDmWxbwno5fWaL2wgHmBwjy", 
+      "role": "admin"
+    }
+  }
+  
+// deploy/windows/install-service.bat
+@echo off
+REM =====================================================
+REM CORE-SERVICES WINDOWS SERVICE INSTALLER
+REM Works from any directory - Run as Administrator
+REM =====================================================
+
+echo ================================================
+echo CORE-SERVICES - WINDOWS SERVICE INSTALLER
+echo ================================================
+
+REM Get current directory (where this script is located)
+set "SCRIPT_DIR=%~dp0"
+set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
+
+REM Navigate to core-services root (two levels up from deploy/windows/)
+set "SERVICE_DIR=%SCRIPT_DIR%\..\.."
+cd /d "%SERVICE_DIR%"
+
+echo Installing from: %CD%
+echo.
+
+echo [1/6] Verifying location...
+if not exist "package.json" (
+    echo ERROR: package.json not found
+    echo This script must be run from deploy/windows/ folder
+    echo Current directory: %CD%
+    pause
+    exit /b 1
+)
+
+echo [2/6] Checking Node.js installation...
+node --version >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: Node.js is not installed
+    echo Download from: https://nodejs.org
+    pause
+    exit /b 1
+)
+node --version
+
+echo [3/6] Building TypeScript project...
+npm run build
+if errorlevel 1 (
+    echo ERROR: Failed to build project
+    echo Make sure 'npm run build' works correctly
+    pause
+    exit /b 1
+)
+
+echo [4/6] Installing production dependencies...
+npm install --production --silent
+
+echo [5/6] Installing node-windows...
+npm install node-windows --silent
+
+echo [6/6] Creating Windows service...
+REM Create service using inline Node.js command
+node -e "const Service=require('node-windows').Service;const path=require('path');console.log('Creating service...');const svc=new Service({name:'Core Services',description:'Core Services API - Email, PDF, ZPL generation service',script:path.join(__dirname,'dist','app.js'),nodeOptions:['--max-old-space-size=1024'],env:[{name:'NODE_ENV',value:'production'},{name:'CONFIG_MODE',value:'standalone'},{name:'CLIENT_ID',value:'core-dev'},{name:'GPG_PASSPHRASE',value:'CHANGE_THIS_GPG_PASSPHRASE'}],logOnAs:{domain:'workgroup',account:'LocalSystem',password:''}});svc.on('install',()=>{console.log('✅ Service installed successfully');console.log('🚀 Starting service...');setTimeout(()=>svc.start(),2000);});svc.on('start',()=>{console.log('🟢 Service started successfully');console.log('🌐 API available at: http://localhost:3001');console.log('📊 View logs in: Event Viewer > Application');console.log('');console.log('================================================');console.log('INSTALLATION COMPLETED');console.log('================================================');});svc.on('error',err=>{console.error('❌ Error:',err.message);});if(!require('fs').existsSync(path.join(__dirname,'dist','app.js'))){console.error('❌ ERROR: dist/app.js not found');console.error('   Run: npm run build');process.exit(1);}svc.install();"
+
+echo.
+echo ================================================
+echo SERVICE INSTALLATION COMPLETED
+echo ================================================
+echo Location: %CD%
+echo.
+echo ⚠️ IMPORTANT: Update GPG_PASSPHRASE
+echo   1. Open services.msc
+echo   2. Find "Core Services" → Properties
+echo   3. Log On tab → Environment variables
+echo   4. Change GPG_PASSPHRASE value
+echo.
+echo To check service status:
+echo   services.msc → "Core Services"
+echo.
+echo To view logs:
+echo   Event Viewer → Application → Filter by "Core Services"
+echo.
+echo To manage the service use:
+echo   start-service.bat
+echo   stop-service.bat
+echo   restart-service.bat
+echo   status-service.bat
+echo.
+echo To test API:
+echo   http://localhost:3001/health
+echo.
+pause
+// deploy/windows/restart-service.bat
+REM =====================================================
+REM start-service.bat
+REM =====================================================
+@echo off
+echo Starting Core Services...
+net start "Core Services"
+if errorlevel 1 (
+    echo ERROR: Could not start service
+    echo Check services.msc for details
+) else (
+    echo ✅ Service started successfully
+    echo 🌐 API available at: http://localhost:3001/health
+    timeout /t 3 /nobreak >nul
+    echo 🔍 Testing API...
+    curl -s http://localhost:3001/health >nul 2>&1
+    if errorlevel 1 (
+        echo ⚠️ API not responding yet, give it a few more seconds
+    ) else (
+        echo ✅ API working correctly
+    )
+)
+pause
+
+REM =====================================================
+REM stop-service.bat
+REM =====================================================
+@echo off
+echo Stopping Core Services...
+net stop "Core Services"
+if errorlevel 1 (
+    echo ERROR: Could not stop service
+    echo Service might already be stopped
+) else (
+    echo ✅ Service stopped successfully
+)
+pause
+
+REM =====================================================
+REM restart-service.bat
+REM =====================================================
+@echo off
+echo ================================================
+echo RESTARTING CORE SERVICES
+echo ================================================
+echo.
+
+echo [1/3] Stopping service...
+net stop "Core Services" >nul 2>&1
+
+echo [2/3] Waiting 5 seconds...
+timeout /t 5 /nobreak >nul
+
+echo [3/3] Starting service...
+net start "Core Services"
+if errorlevel 1 (
+    echo ERROR: Could not restart service
+    echo Check services.msc or Event Viewer for details
+    pause
+    exit /b 1
+)
+
+echo ✅ Service restarted successfully
+echo.
+echo 🔍 Verifying API response...
+timeout /t 10 /nobreak >nul
+
+curl -s http://localhost:3001/health >nul 2>&1
+if errorlevel 1 (
+    echo ⚠️ Service started but API not responding
+    echo Check Event Viewer for error details
+    echo Service might need more time to initialize
+) else (
+    echo ✅ API working correctly
+    echo 🌐 http://localhost:3001/health
+)
+echo.
+pause
+
+REM =====================================================
+REM status-service.bat
+REM =====================================================
+@echo off
+echo ================================================
+echo CORE SERVICES STATUS
+echo ================================================
+echo Current directory: %CD%
+echo.
+
+REM Check if service exists
+sc query "Core Services" >nul 2>&1
+if errorlevel 1 (
+    echo ❌ Service not installed
+    echo Run install-service.bat first
+    goto :end
+)
+
+REM Show service status
+echo 🔍 Service status:
+sc query "Core Services" | find "STATE"
+
+REM Test API
+echo.
+echo 🔍 Testing API...
+curl -s -w "Response time: %%{time_total}s\n" http://localhost:3001/health 2>nul
+if errorlevel 1 (
+    echo ❌ API not responding
+    echo.
+    echo Possible causes:
+    echo - Service is stopped
+    echo - Service is starting up
+    echo - Configuration error
+    echo.
+    echo Check Event Viewer for more details
+) else (
+    echo ✅ API working correctly
+)
+
+:end
+echo.
+echo For detailed logs:
+echo   Event Viewer ^> Application ^> Filter by "Core Services"
+echo.
+echo For service management:
+echo   services.msc ^> "Core Services"
+echo.
+pause
+
+REM =====================================================
+REM uninstall-service.bat
+REM =====================================================
+@echo off
+echo ================================================
+echo ⚠️ UNINSTALLING CORE SERVICES
+echo ================================================
+echo Current directory: %CD%
+echo.
+
+REM Verify we're in the correct location
+cd /d "%~dp0\..\.."
+if not exist "package.json" (
+    echo ERROR: Run from deploy/windows/ folder
+    echo package.json not found in: %CD%
+    pause
+    exit /b 1
+)
+
+set /p confirm="Are you sure you want to uninstall the service? (Y/N): "
+if /i not "%confirm%"=="Y" (
+    echo Operation cancelled
+    pause
+    exit /b
+)
+
+echo.
+echo [1/3] Stopping service...
+net stop "Core Services" >nul 2>&1
+
+echo [2/3] Checking node-windows...
+npm list node-windows >nul 2>&1
+if errorlevel 1 (
+    echo Installing node-windows...
+    npm install node-windows --silent
+)
+
+echo [3/3] Uninstalling service...
+REM Uninstall service using inline Node.js command
+node -e "const Service=require('node-windows').Service;const path=require('path');console.log('Uninstalling service...');const svc=new Service({name:'Core Services',script:path.join(__dirname,'dist','app.js')});svc.on('uninstall',()=>{console.log('✅ Service uninstalled successfully');console.log('🧹 Cleanup completed');console.log('');console.log('The Core Services service has been removed from the system');console.log('You can manually delete this folder if desired');});svc.on('error',err=>{console.error('❌ Uninstall error:',err.message);});svc.uninstall();"
+
+echo.
+echo ✅ Uninstallation process completed
+echo.
+pause
+// deploy/windows/start-service.bat
+@echo off
+REM =====================================================
+REM CORE-SERVICES - CHECK SERVICE STATUS
+REM Run from deploy/windows/ folder
+REM =====================================================
+
+echo ================================================
+echo CORE SERVICES STATUS CHECK
+echo ================================================
+echo Current directory: %CD%
+echo Timestamp: %DATE% %TIME%
+echo.
+
+REM Check if service exists
+echo 🔍 Checking if service is installed...
+sc query "Core Services" >nul 2>&1
+if errorlevel 1 (
+    echo ❌ Service not installed
+    echo.
+    echo To install the service:
+    echo   run install-service.bat as Administrator
+    echo.
+    goto :end
+)
+
+echo ✅ Service is installed
+echo.
+
+REM Show detailed service status
+echo 🔍 Service status:
+for /f "tokens=4" %%i in ('sc query "Core Services" ^| find "STATE"') do set SERVICE_STATE=%%i
+echo    State: %SERVICE_STATE%
+
+sc query "Core Services" | find "STATE"
+echo.
+
+REM Test API if service is running
+if /i "%SERVICE_STATE%"=="RUNNING" (
+    echo 🌐 Testing API connectivity...
+    
+    REM Test with timeout and response time
+    curl -s -w "   Response time: %%{time_total}s" -m 10 http://localhost:3001/health 2>nul
+    if errorlevel 1 (
+        echo ❌ API not responding
+        echo.
+        echo Possible issues:
+        echo - Service is starting up ^(wait 30-60 seconds^)
+        echo - Configuration error
+        echo - Port 3001 is blocked
+        echo - Application crashed after service start
+        echo.
+        echo Check Event Viewer for error details
+    ) else (
+        echo.
+        echo ✅ API is working correctly
+        echo 🌐 Full API URL: http://localhost:3001/health
+    )
+) else (
+    echo ⚠️ Service is not running - skipping API test
+    echo.
+    echo To start the service:
+    echo   start-service.bat
+)
+
+echo.
+echo 📊 Additional Information:
+echo    Service name: Core Services
+echo    Display name: Core Services
+echo    Port: 3001
+echo    Startup type: Automatic
+echo.
+
+:end
+echo 📋 Management Commands:
+echo    start-service.bat    - Start the service
+echo    stop-service.bat     - Stop the service  
+echo    restart-service.bat  - Restart the service
+echo    status-service.bat   - This status check
+echo.
+echo 📊 Monitoring:
+echo    services.msc                           - Windows Service Manager
+echo    Event Viewer ^> Application ^> Core Services - Service logs
+echo    http://localhost:3001/health           - API health check
+echo.
+pause
+// deploy/windows/status-service.bat
+REM status-service.bat  
+@echo off
+echo ================================================
+echo STATUS OF CORE SERVICES
+echo ================================================
+echo Current Folder: %CD%
+echo.
+
+REM Verificar si el servicio existe
+sc query "Core Services" >nul 2>&1
+if errorlevel 1 (
+    echo ❌ Service "Core Services" not installed.
+    echo Execute install-service.bat to install it.
+    goto :end
+)
+
+REM Mostrar estado del servicio
+echo 🔍 Service status:
+sc query "Core Services" | find "STATE"
+
+REM Probar la API
+echo.
+echo 🔍 Checking API health...
+curl -s -w "Response time: %%{time_total}s\n" http://localhost:3001/health 2>nul
+if errorlevel 1 (
+    echo ❌ API is not responding.
+    echo.
+    echo Possible reasons:
+    echo - Service is not running
+    echo - Service is starting
+    echo - Configuration error
+    echo - Check Event Viewer for more details
+) else (
+    echo ✅ API funcionando correctamente
+)
+
+:end
+echo.
+echo To see logs:
+echo   Event Viewer ^> Application ^> Filter by "Core Services"
+echo.
+echo To manage the service:
+echo   services.msc ^> "Core Services"
+echo.
+pause
+// deploy/windows/stop-service.bat
+REM stop-service.bat  
+@echo off
+echo Stopping Core Services...
+net stop "Core Services"
+if errorlevel 1 (
+    echo ERROR: Service could not be stopped
+    echo Service may be already stopped or does not exist.
+    echo If you want to uninstall the service, run:
+    echo uninstall-service.bat
+    echo If you want to start the service again, run:
+    echo start-service.bat
+    echo You can also check the service status using:
+    echo sc query "Core Services"    
+) else (
+    echo ✅ Service stopped successfully.
+    echo You can now safely uninstall the service if needed.
+    echo If you want to uninstall the service, run:
+    echo uninstall-service.bat
+    echo If you want to start the service again, run:
+    echo start-service.bat
+)
+pause
+// deploy/windows/uninstall-service.bat
+@echo off
+REM =====================================================
+REM CORE-SERVICES WINDOWS SERVICE UNINSTALLER
+REM Run as Administrator from deploy/windows/ folder
+REM =====================================================
+
+echo ================================================
+echo ⚠️ UNINSTALLING CORE SERVICES
+echo ================================================
+
+REM Get current directory and navigate to core-services root
+set "SCRIPT_DIR=%~dp0"
+cd /d "%SCRIPT_DIR%\..\.."
+
+echo Current directory: %CD%
+echo.
+
+REM Verify we're in the correct location
+if not exist "package.json" (
+    echo ERROR: package.json not found
+    echo This script must be run from deploy/windows/ folder
+    echo Current directory: %CD%
+    pause
+    exit /b 1
+)
+
+echo Found core-services project at: %CD%
+echo.
+
+set /p confirm="Are you sure you want to uninstall the Core Services Windows Service? (Y/N): "
+if /i not "%confirm%"=="Y" (
+    echo Operation cancelled
+    pause
+    exit /b
+)
+
+echo.
+echo [1/3] Stopping service...
+net stop "Core Services" >nul 2>&1
+if errorlevel 1 (
+    echo Service was already stopped or not found
+) else (
+    echo Service stopped successfully
+)
+
+echo [2/3] Checking node-windows dependency...
+npm list node-windows >nul 2>&1
+if errorlevel 1 (
+    echo Installing node-windows...
+    npm install node-windows --silent
+    if errorlevel 1 (
+        echo ERROR: Failed to install node-windows
+        echo Make sure npm is working correctly
+        pause
+        exit /b 1
+    )
+) else (
+    echo node-windows is available
+)
+
+echo [3/3] Uninstalling Windows service...
+REM Uninstall service using inline Node.js command (no separate .js files needed)
+node -e "const Service=require('node-windows').Service;const path=require('path');console.log('🗑️ Uninstalling Core Services...');const svc=new Service({name:'Core Services',script:path.join(__dirname,'dist','app.js')});svc.on('uninstall',()=>{console.log('✅ Service uninstalled successfully');console.log('🧹 Windows Service cleanup completed');console.log('');console.log('================================================');console.log('UNINSTALLATION COMPLETED');console.log('================================================');console.log('');console.log('The Core Services Windows Service has been removed');console.log('from the system. You can manually delete this folder');console.log('if you no longer need the application.');console.log('');});svc.on('error',err=>{console.error('❌ Uninstall error:',err.message);console.error('You may need to remove the service manually using:');console.error('sc delete \"Core Services\"');});svc.uninstall();"
+
+if errorlevel 1 (
+    echo.
+    echo ⚠️ Uninstall script encountered an error
+    echo You may need to remove the service manually:
+    echo   sc delete "Core Services"
+    echo.
+    pause
+    exit /b 1
+)
+
+echo.
+echo ✅ Uninstallation process completed successfully
+echo.
+echo The "Core Services" Windows Service has been removed.
+echo Event Viewer logs may still contain historical entries.
+echo.
+echo To completely remove the application:
+echo   1. Delete this entire folder
+echo   2. Remove any shortcuts or references
+echo.
+pause
