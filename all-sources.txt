@@ -157,10 +157,12 @@ import puppeteer, { Browser, Page } from 'puppeteer';
 import fs from 'fs';
 import os from 'os';
 import logger from '../utils/logging';
+import { BrowserPoolConfig  } from '../services/serviceContainer'; // O como obtengas el contenedor de servicios
 
-const MAX_BROWSERS = parseInt(process.env.MAX_BROWSERS || '4');
-const MAX_PAGES_PER_BROWSER = parseInt(process.env.MAX_PAGES_PER_BROWSER || '10');
-const PAGE_IDLE_TIMEOUT = parseInt(process.env.PAGE_IDLE_TIMEOUT || '300000'); // 5 min
+// vars to config del container
+let MAX_BROWSERS: number;
+let MAX_PAGES_PER_BROWSER: number;
+let PAGE_IDLE_TIMEOUT: number;
 
 interface PageInfo {
   page: Page;
@@ -181,14 +183,22 @@ function getExecutablePath(): string | undefined {
   return undefined;
 }
 
-export async function initializeBrowserPool() {
+export async function initializeBrowserPool(config?: BrowserPoolConfig) {
+
+  // Load configuration from environment variables or provided config
+  MAX_BROWSERS = config?.maxBrowsers || parseInt(process.env.MAX_BROWSERS || '2');
+  MAX_PAGES_PER_BROWSER = config?.maxPagesPerBrowser || parseInt(process.env.MAX_PAGES_PER_BROWSER || '3');
+  PAGE_IDLE_TIMEOUT = config?.pageIdleTimeout || parseInt(process.env.PAGE_IDLE_TIMEOUT || '300000');
+  
   logger.system('Initializing browser pool', {
     max_browsers: MAX_BROWSERS,
     max_pages_per_browser: MAX_PAGES_PER_BROWSER,
     page_idle_timeout_ms: PAGE_IDLE_TIMEOUT
   });
 
+  // validate configuration
   for (let i = 0; i < MAX_BROWSERS; i++) {
+    
     try {
       const browser = await puppeteer.launch({
         headless: 'new',
@@ -219,7 +229,7 @@ export async function initializeBrowserPool() {
     }
   }
   
-  // Iniciar cleanup de páginas idle
+  // Cleanup idle pages periodically
   startPageCleanup();
   
   logger.system('Browser pool initialization completed', {
@@ -231,7 +241,7 @@ export async function initializeBrowserPool() {
 export async function acquirePage(): Promise<Page> {
   const startTime = Date.now();
   
-  // 1. Intentar usar página disponible
+  //Try to acquire a page from the pool
   if (availablePages.length > 0) {
     const pageInfo = availablePages.pop()!;
     pageInfo.lastUsed = Date.now();
@@ -245,7 +255,7 @@ export async function acquirePage(): Promise<Page> {
     return pageInfo.page;
   }
 
-  // 2. Crear nueva página si no hemos alcanzado el límite
+  // Create a new page if we have not reached the maximum limit
   const totalPages = getTotalActivePages();
   const maxTotalPages = MAX_BROWSERS * MAX_PAGES_PER_BROWSER;
   
@@ -253,7 +263,7 @@ export async function acquirePage(): Promise<Page> {
     const browser = getLeastLoadedBrowser();
     const page = await browser.newPage();
     
-    // Configurar timeouts para evitar páginas colgadas
+    // Setup default timeouts
     page.setDefaultTimeout(30000);
     page.setDefaultNavigationTimeout(30000);
     
@@ -267,14 +277,14 @@ export async function acquirePage(): Promise<Page> {
     return page;
   }
 
-  // 3. Si llegamos al límite, esperar por una página disponible
+  // if we reach here, it means we have no available pages and reached the max limit
   logger.warn('Page pool exhausted, waiting for available page', {
     total_active_pages: totalPages,
     max_pages: maxTotalPages,
     available_pages: availablePages.length
   });
   
-  // Esperar hasta 30 segundos por una página disponible
+  //wait for an available page
   const maxWaitTime = 30000;
   const pollInterval = 100;
   let waitTime = 0;
@@ -297,7 +307,7 @@ export async function acquirePage(): Promise<Page> {
     waitTime += pollInterval;
   }
   
-  // 4. Si no hay páginas disponibles después de esperar, forzar creación
+  // if there are still no available pages after waiting, create a new one
   logger.error('Page pool timeout, forcing new page creation', {
     wait_time_ms: waitTime,
     total_active_pages: getTotalActivePages()
@@ -315,22 +325,22 @@ export async function releasePage(page: Page) {
   const startTime = Date.now();
   
   try {
-    // Limpiar la página
+    // Clean up the page before releasing it
     await page.goto('about:blank', { waitUntil: 'domcontentloaded', timeout: 5000 });
     
-    // Limpiar cookies y storage
+    // CLean up cookies
     await page.evaluate(() => {
-      // Limpiar localStorage y sessionStorage
+      // Clean up session storage
       if (typeof Storage !== 'undefined') {
         localStorage.clear();
         sessionStorage.clear();
       }
     });
     
-    // Encontrar el browser de esta página
+    // Find the browser instance for this page
     const browser = page.browser();
     
-    // Agregar a pool disponible si no excedemos el límite
+    // Add a new entry to the available pages pool
     if (availablePages.length < MAX_PAGES_PER_BROWSER * MAX_BROWSERS) {
       availablePages.push({
         page,
@@ -344,7 +354,7 @@ export async function releasePage(page: Page) {
         status: 'pooled'
       });
     } else {
-      // Si tenemos demasiadas páginas, cerrar esta
+      // If we have reached the maximum number of pages, close the page
       await page.close();
       
       logger.pdf('Page closed (pool full)', {
@@ -355,7 +365,7 @@ export async function releasePage(page: Page) {
     }
     
   } catch (error) {
-    // Si falla la limpieza, cerrar la página
+    // if cleanup fails, log the error and close the page
     try {
       await page.close();
       logger.warn('Page cleanup failed, page closed', {
@@ -383,7 +393,7 @@ function getLeastLoadedBrowser(): Browser {
     throw new Error('No browsers available in pool');
   }
   
-  // Por simplicidad, rotar browsers de manera round-robin
+  // rotate through browsers to balance load
   return browsers[Math.floor(Math.random() * browsers.length)];
 }
 
@@ -768,6 +778,11 @@ const loadConfig = async () => {
       authUsername: secretsConfig.auth_username ?? yamlConfig.authUsername,
       authPassword: secretsConfig.auth_password ?? yamlConfig.authPassword,
       
+      // Browser Pool Configuration
+      maxBrowsers: yamlConfig.maxBrowsers ?? secretsConfig.max_browsers ?? 2,
+      maxPagesPerBrowser: yamlConfig.maxPagesPerBrowser ?? secretsConfig.max_pages_per_browser ?? 3,
+      pageIdleTimeout: yamlConfig.pageIdleTimeout ?? secretsConfig.page_idle_timeout ?? 300000,      
+
       // Build URLs from config
       coreApiHost: yamlConfig.coreApiHost ?? '',
       servicesPort: yamlConfig.servicesPort ?? '',
@@ -780,6 +795,8 @@ const loadConfig = async () => {
       certPdfSignType: yamlConfig.certPdfSignType ?? 'p12',
       certPdfSignPath: secretsConfig.cert_pdf_sign_path ?? yamlConfig.certPdfSignPath ?? '',
       certPdfSignPassword: secretsConfig.cert_pdf_sign_password ?? yamlConfig.certPdfSignPassword ?? '',
+
+      
       
       // Metadata
       config_source: 'SOPS_ONLY'
@@ -2919,177 +2936,6 @@ export function initGDPRService(): GDPRTokenService {
   });
   return gdprService;
 } 
-// src/services/logEmitter.ts
-import axios from "axios";
-import { getServiceContainer } from "./serviceContainer";
-import { getAuthToken } from "../utils/getToken";
-import logger from "../utils/logging";
-
-export interface LogPayload {
-  level: "INFO" | "ERROR" | "WARN" | "DEBUG" | "TRACE" | "FATAL" | "CRITICAL" | "ALERT" | "EMERGENCY" | "NOTICE" | "AUDIT";
-  message: string;
-  service: string; // name of the service emitting the log
-  metadata?: Record<string, any>;
-  trace_id?: string; // optional trace ID for distributed tracing
-}
-
-/**
- * Send log to centralized logging system
- * 
- * Note: This is a legacy function that was used before implementing
- * the nuclear logger system. It's maintained for backward compatibility
- * but should be phased out in favor of the structured logger.
- * 
- * @param log - Log payload to send
- * @deprecated Use the nuclear logger system instead: import logger from '../utils/logging'
- */
-export async function sendLog(log: LogPayload): Promise<void> {
-  const startTime = Date.now();
-  
-  try {
-    logger.debug('Legacy log emitter called', {
-      operation: 'SYSTEM',
-      service: log.service,
-      level: log.level,
-      message_preview: log.message.substring(0, 50),
-      has_metadata: !!log.metadata,
-      has_trace_id: !!log.trace_id,
-      deprecated_warning: 'Consider migrating to nuclear logger system'
-    });
-
-    if (!log.service) {
-      logger.warn('Legacy log emitter missing service field', {
-        operation: 'SYSTEM',
-        error_code: 'MISSING_SERVICE_FIELD',
-        log_level: log.level,
-        duration_ms: Date.now() - startTime
-      });
-      throw new Error("Missing 'service' in log payload");
-    }
-
-    // Check if we have the required configuration
-    const container = getServiceContainer();
-    const tokenConfig = container.getTokenConfig();
-    
-    // TODO: This function needs proper API URL configuration
-    // For now, we'll log the attempt but not actually send
-    const payload = {
-      client_id: tokenConfig.tenantId,
-      timestamp: new Date().toISOString(),
-      ...log,
-    };
-
-    logger.debug('Legacy log emitter payload prepared', {
-      operation: 'SYSTEM',
-      client_id: tokenConfig.tenantId,
-      service: log.service,
-      level: log.level,
-      payload_size: JSON.stringify(payload).length,
-      duration_ms: Date.now() - startTime,
-      status: 'DISABLED_NO_API_URL',
-      note: 'Central logging endpoint not configured'
-    });
-
-    // REMOVED: Ugly console.log statements
-    // These were polluting the logs with debugging info
-    
-    // TODO: Implement actual sending when API URL is configured
-    // const token = await getAuthToken();
-    // await axios.post(`${apiUrl}/emit-log`, payload, {
-    //   headers: {
-    //     Authorization: `Bearer ${token}`,
-    //   },
-    // });
-    
-    logger.debug('Legacy log emitter completed', {
-      operation: 'SYSTEM',
-      service: log.service,
-      duration_ms: Date.now() - startTime,
-      status: 'SIMULATED_SUCCESS',
-      recommendation: 'Migrate to logger.pdf(), logger.email(), logger.zpl() methods'
-    });
-
-  } catch (err: any) {
-    logger.error('Legacy log emitter failed', {
-      operation: 'SYSTEM',
-      error_code: 'LOG_EMIT_ERROR',
-      error_message: err.message,
-      service: log?.service || 'UNKNOWN',
-      duration_ms: Date.now() - startTime,
-      stack: err.stack
-    });
-  }
-}
-
-/**
- * Migration helper: Convert legacy log to nuclear logger call
- * 
- * This function helps migrate from legacy sendLog() calls to the new logger system
- * Usage: migrateLegacyLog({ service: 'pdf', level: 'INFO', message: 'PDF generated' })
- * 
- * @param log - Legacy log payload
- */
-export function migrateLegacyLog(log: LogPayload): void {
-  const meta = {
-    trace_id: log.trace_id,
-    legacy_service: log.service,
-    legacy_level: log.level,
-    ...(log.metadata || {})
-  };
-
-  switch (log.service.toLowerCase()) {
-    case 'pdf':
-      if (log.level === 'ERROR') {
-        logger.pdf(`Legacy: ${log.message}`, meta);
-      } else {
-        logger.pdf(`Legacy: ${log.message}`, meta);
-      }
-      break;
-      
-    case 'zpl':
-      if (log.level === 'ERROR') {
-        logger.zpl(`Legacy: ${log.message}`, meta);
-      } else {
-        logger.zpl(`Legacy: ${log.message}`, meta);
-      }
-      break;
-      
-    case 'email':
-      if (log.level === 'ERROR') {
-        logger.email(`Legacy: ${log.message}`, meta);
-      } else {
-        logger.email(`Legacy: ${log.message}`, meta);
-      }
-      break;
-      
-    default:
-      if (log.level === 'ERROR') {
-        logger.error(`Legacy ${log.service}: ${log.message}`, meta);
-      } else {
-        logger.info(`Legacy ${log.service}: ${log.message}`, meta);
-      }
-  }
-}
-
-/**
- * Check if central logging endpoint is configured
- * 
- * @returns true if ready to send to central logging system
- */
-export function isCentralLoggingAvailable(): boolean {
-  // TODO: Implement when API URL configuration is added to ServiceContainer
-  return false;
-}
-
-/**
- * Get the configured central logging endpoint URL
- * 
- * @returns URL string or null if not configured
- */
-export function getCentralLoggingUrl(): string | null {
-  // TODO: Implement when API URL configuration is added to ServiceContainer
-  return null;
-}
 // src/services/pdf/generate.ts
 // src/services/pdf/generate.ts - VERSIÓN MEJORADA
 import path from "path";
@@ -3924,6 +3770,15 @@ import { AuthConfig } from '../utils/getToken';
 import { initializeBrowserPool } from '../config/browserPool';
 
 /**
+ * Browser Pool Configuration
+ */
+export interface BrowserPoolConfig {
+  maxBrowsers: number;
+  maxPagesPerBrowser: number;
+  pageIdleTimeout: number;
+}
+
+/**
  * Service Container for Dependency Injection
  * Centralizes all service configurations and provides clean access
  */
@@ -3932,6 +3787,7 @@ export class ServiceContainer {
   private jwtSecret: string;
   private pdfSigningConfig: PdfSigningConfig;
   private authConfig: AuthConfig;
+  private browserPoolConfig: BrowserPoolConfig;
 
   constructor(appConfig: any) {
     // Email service configuration
@@ -3955,9 +3811,16 @@ export class ServiceContainer {
 
     // Auth configuration
     this.authConfig = {
-      authUrl: appConfig.authFullUrl, // Using authFullUrl from your original config
+      authUrl: appConfig.authFullUrl,
       authUsername: appConfig.authUsername,
       authPassword: appConfig.authPassword
+    };
+
+    // Browser Pool configuration
+    this.browserPoolConfig = {
+      maxBrowsers: appConfig.maxBrowsers || 2,
+      maxPagesPerBrowser: appConfig.maxPagesPerBrowser || 3,
+      pageIdleTimeout: appConfig.pageIdleTimeout || 300000
     };
   }
 
@@ -4000,6 +3863,13 @@ export class ServiceContainer {
   getAuthConfig(): AuthConfig {
     return this.authConfig;
   }
+
+  /**
+   * Get Browser Pool Configuration
+   */
+  getBrowserPoolConfig(): BrowserPoolConfig {
+    return this.browserPoolConfig;
+  }
 }
 
 // Global service container instance
@@ -4012,10 +3882,15 @@ let serviceContainer: ServiceContainer | null = null;
 export async function initServiceContainer(appConfig: any): Promise<ServiceContainer> {
   serviceContainer = new ServiceContainer(appConfig);
   
-  // Inicializar browser pool también
-  await initializeBrowserPool();
-  console.log('🌐 Browser pool initialized');
- 
+  // Inicializar browser pool con la configuración del container
+  await initializeBrowserPool(serviceContainer.getBrowserPoolConfig());
+  
+  console.log('🌐 Browser pool initialized with config:', {
+    maxBrowsers: serviceContainer.getBrowserPoolConfig().maxBrowsers,
+    maxPagesPerBrowser: serviceContainer.getBrowserPoolConfig().maxPagesPerBrowser,
+    pageIdleTimeout: serviceContainer.getBrowserPoolConfig().pageIdleTimeout
+  });
+  
   return serviceContainer;
 }
 
@@ -6612,6 +6487,328 @@ export const zplRequestSchema = z.object({
     }
   }
   
+// deploy/windows/core-services.bat
+@echo off
+REM =====================================================
+REM CORE-SERVICES - UNIFIED WINDOWS SERVICE MANAGER
+REM Run as Administrator for install/uninstall operations
+REM =====================================================
+
+echo ================================================
+echo CORE SERVICES - WINDOWS SERVICE MANAGER
+echo ================================================
+echo.
+
+REM Get command from first argument
+set COMMAND=%1
+set GPG_PASS=%2
+
+REM Show help if no command provided
+if "%COMMAND%"=="" goto :show_help
+
+REM Navigate to core-services root
+cd /d "%~dp0\..\.."
+
+REM Execute the appropriate command
+if /i "%COMMAND%"=="install" goto :install
+if /i "%COMMAND%"=="uninstall" goto :uninstall
+if /i "%COMMAND%"=="start" goto :start
+if /i "%COMMAND%"=="stop" goto :stop
+if /i "%COMMAND%"=="restart" goto :restart
+if /i "%COMMAND%"=="status" goto :status
+if /i "%COMMAND%"=="help" goto :show_help
+
+echo ERROR: Unknown command '%COMMAND%'
+echo.
+goto :show_help
+
+REM =====================================================
+REM INSTALL SERVICE
+REM =====================================================
+:install
+echo [INSTALL] Starting Core Services installation...
+echo.
+
+REM Check if GPG passphrase was provided
+if "%GPG_PASS%"=="" (
+    echo ERROR: GPG passphrase is required for installation
+    echo.
+    echo Usage: core-services.bat install "your-gpg-passphrase"
+    echo.
+    echo Example:
+    echo   core-services.bat install "my$ecureP@ssphrase123"
+    echo.
+    goto :end
+)
+
+REM Check if service already exists
+sc query "Core Services" >nul 2>&1
+if not errorlevel 1 (
+    echo ERROR: Service already installed
+    echo Run 'core-services.bat uninstall' first
+    goto :end
+)
+
+echo [1/6] Verifying location...
+if not exist "package.json" (
+    echo ERROR: package.json not found
+    echo Run this script from deploy/windows/ folder
+    goto :end
+)
+
+echo [2/6] Checking Node.js...
+node --version >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: Node.js is not installed
+    echo Download from: https://nodejs.org
+    goto :end
+)
+node --version
+
+echo [3/6] Building TypeScript project...
+call npm run build
+if errorlevel 1 (
+    echo ERROR: Build failed
+    goto :end
+)
+
+echo [4/6] Installing production dependencies...
+call npm install --production --silent
+
+echo [5/6] Installing node-windows...
+call npm install node-windows --silent
+
+echo [6/6] Creating Windows service with GPG passphrase...
+echo GPG passphrase will be securely stored in the service configuration
+
+REM Create a temporary JS file to handle the complex service creation
+echo const Service = require('node-windows').Service; > temp_install.js
+echo const path = require('path'); >> temp_install.js
+echo. >> temp_install.js
+echo const svc = new Service({ >> temp_install.js
+echo   name: 'Core Services', >> temp_install.js
+echo   description: 'Core Services API - Email, PDF, ZPL generation', >> temp_install.js
+echo   script: path.join(__dirname, 'dist', 'scripts', 'start.js'), >> temp_install.js
+echo   nodeOptions: ['--max-old-space-size=1024'], >> temp_install.js
+echo   env: [ >> temp_install.js
+echo     { name: 'NODE_ENV', value: 'production' }, >> temp_install.js
+echo     { name: 'CLIENT_ID', value: 'core-dev' }, >> temp_install.js
+echo     { name: 'GPG_PASSPHRASE', value: '%GPG_PASS%' }, >> temp_install.js
+echo     { name: 'HOST', value: '0.0.0.0' }, >> temp_install.js
+echo     { name: 'LOG_LEVEL', value: 'INFO' } >> temp_install.js
+echo   ] >> temp_install.js
+echo }); >> temp_install.js
+echo. >> temp_install.js
+echo svc.on('install', () =^> { >> temp_install.js
+echo   console.log('✅ Service installed successfully'); >> temp_install.js
+echo   console.log('📝 GPG passphrase has been configured'); >> temp_install.js
+echo   console.log('🔐 The passphrase is stored securely in Windows service registry'); >> temp_install.js
+echo   console.log('🚀 Starting service...'); >> temp_install.js
+echo   setTimeout(() =^> svc.start(), 2000); >> temp_install.js
+echo }); >> temp_install.js
+echo. >> temp_install.js
+echo svc.on('start', () =^> { >> temp_install.js
+echo   console.log('✅ Service started successfully'); >> temp_install.js
+echo   console.log('🌐 API available at: http://localhost:3001'); >> temp_install.js
+echo   console.log(''); >> temp_install.js
+echo   console.log('================================================'); >> temp_install.js
+echo   console.log('INSTALLATION COMPLETED'); >> temp_install.js
+echo   console.log('================================================'); >> temp_install.js
+echo   console.log(''); >> temp_install.js
+echo   console.log('The GPG passphrase has been permanently configured.'); >> temp_install.js
+echo   console.log('The service will use it automatically on every restart.'); >> temp_install.js
+echo   console.log(''); >> temp_install.js
+echo   console.log('To verify installation:'); >> temp_install.js
+echo   console.log('  core-services.bat status'); >> temp_install.js
+echo   console.log(''); >> temp_install.js
+echo   console.log('To change the GPG passphrase later:'); >> temp_install.js
+echo   console.log('  1. Uninstall: core-services.bat uninstall'); >> temp_install.js
+echo   console.log('  2. Reinstall: core-services.bat install "new-passphrase"'); >> temp_install.js
+echo }); >> temp_install.js
+echo. >> temp_install.js
+echo svc.on('error', err =^> { >> temp_install.js
+echo   console.error('❌ Installation error:', err.message); >> temp_install.js
+echo }); >> temp_install.js
+echo. >> temp_install.js
+echo svc.install(); >> temp_install.js
+
+REM Execute the installation
+node temp_install.js
+
+REM Clean up temp file
+del temp_install.js
+
+goto :end
+
+REM =====================================================
+REM UNINSTALL SERVICE
+REM =====================================================
+:uninstall
+echo [UNINSTALL] Removing Core Services...
+echo.
+
+set /p confirm="Are you sure? (Y/N): "
+if /i not "%confirm%"=="Y" (
+    echo Cancelled
+    goto :end
+)
+
+echo Stopping service...
+net stop "Core Services" >nul 2>&1
+
+echo Installing node-windows if needed...
+npm install node-windows --silent >nul 2>&1
+
+echo Uninstalling service...
+node -e "const Service=require('node-windows').Service;const path=require('path');const svc=new Service({name:'Core Services',script:path.join(__dirname,'dist','scripts','start.js')});svc.on('uninstall',()=>{console.log('✅ Service uninstalled successfully');console.log('🔐 GPG passphrase configuration has been removed')});svc.uninstall();"
+
+echo.
+echo ✅ Uninstall completed
+echo 🔐 All configuration (including GPG passphrase) has been removed
+goto :end
+
+REM =====================================================
+REM START SERVICE
+REM =====================================================
+:start
+echo [START] Starting Core Services...
+net start "Core Services"
+if errorlevel 1 (
+    echo ERROR: Could not start service
+    echo.
+    echo Possible causes:
+    echo - Service is not installed (run: core-services.bat install "gpg-passphrase")
+    echo - Service is already running
+    echo - Check Event Viewer for details
+) else (
+    echo ✅ Service started
+    echo 🔐 Using stored GPG passphrase
+    timeout /t 3 /nobreak >nul
+    echo.
+    echo Testing API...
+    curl -s http://localhost:3001/health >nul 2>&1
+    if errorlevel 1 (
+        echo ⚠️  API not responding yet (give it 30-60 seconds)
+    ) else (
+        echo ✅ API is working
+    )
+)
+goto :end
+
+REM =====================================================
+REM STOP SERVICE
+REM =====================================================
+:stop
+echo [STOP] Stopping Core Services...
+net stop "Core Services"
+if errorlevel 1 (
+    echo ERROR: Could not stop service
+    echo Service might not be running or not installed
+) else (
+    echo ✅ Service stopped
+)
+goto :end
+
+REM =====================================================
+REM RESTART SERVICE
+REM =====================================================
+:restart
+echo [RESTART] Restarting Core Services...
+net stop "Core Services" >nul 2>&1
+timeout /t 5 /nobreak >nul
+net start "Core Services"
+if errorlevel 1 (
+    echo ERROR: Could not restart service
+) else (
+    echo ✅ Service restarted
+    echo 🔐 Using stored GPG passphrase
+    timeout /t 10 /nobreak >nul
+    curl -s http://localhost:3001/health >nul 2>&1
+    if errorlevel 1 (
+        echo ⚠️  API starting up...
+    ) else (
+        echo ✅ API is working
+    )
+)
+goto :end
+
+REM =====================================================
+REM STATUS CHECK
+REM =====================================================
+:status
+echo [STATUS] Checking Core Services...
+echo.
+
+REM Check if service exists
+sc query "Core Services" >nul 2>&1
+if errorlevel 1 (
+    echo ❌ Service not installed
+    echo.
+    echo To install:
+    echo   core-services.bat install "your-gpg-passphrase"
+    echo.
+    goto :end
+)
+
+REM Show service status
+echo Service Status:
+sc query "Core Services" | find "STATE"
+echo.
+
+REM Check GPG configuration
+echo Configuration:
+echo - GPG passphrase: [CONFIGURED - Hidden for security]
+echo - Client ID: core-dev
+echo - Port: 3001
+echo.
+
+REM Test API
+echo Testing API...
+curl -s -w "Response time: %%{time_total}s\n" http://localhost:3001/health 2>nul
+if errorlevel 1 (
+    echo ❌ API not responding
+    echo.
+    echo Troubleshooting:
+    echo - Wait 30-60 seconds if service just started
+    echo - Check Event Viewer for errors
+    echo - Verify GPG passphrase is correct
+) else (
+    echo ✅ API is working
+)
+echo.
+
+echo Logs: Event Viewer ^> Application ^> "Core Services"
+goto :end
+
+REM =====================================================
+REM SHOW HELP
+REM =====================================================
+:show_help
+echo Usage: core-services.bat [command] [options]
+echo.
+echo Commands:
+echo   install "passphrase" - Install service with GPG passphrase
+echo   uninstall           - Remove Core Services
+echo   start               - Start the service
+echo   stop                - Stop the service
+echo   restart             - Restart the service
+echo   status              - Check service status
+echo   help                - Show this help
+echo.
+echo Examples:
+echo   core-services.bat install "my$ecureP@ssphrase123"
+echo   core-services.bat status
+echo   core-services.bat restart
+echo.
+echo Notes:
+echo   - The GPG passphrase is required only during installation
+echo   - It will be stored securely in the Windows service configuration
+echo   - The service will use it automatically on every restart
+echo   - To change the passphrase, uninstall and reinstall the service
+echo.
+
+:end
+pause
 // deploy/windows/install-service.bat
 @echo off
 REM =====================================================
