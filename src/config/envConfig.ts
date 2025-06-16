@@ -1,13 +1,13 @@
 // config/envConfig.ts - SIMPLIFIED VERSION - SOPS ONLY
-import { spawn } from 'child_process';
-import fs from 'fs';
-import path from 'path';
-import yaml from 'js-yaml';
+import { spawn } from "child_process";
+import fs from "fs";
+import path from "path";
+import yaml from "js-yaml";
 import logger from "../utils/logging";
 
 /**
  * SIMPLIFIED CONFIG LOADER - SOPS ONLY
- * 
+ *
  * This version removes all .env complexity and focuses on SOPS decryption.
  * Clean, simple, and maintainable.
  */
@@ -17,20 +17,20 @@ import logger from "../utils/logging";
  */
 const getClientId = (): string => {
   const cliArgs = process.argv.slice(2);
-  const cliClientId = cliArgs.find(arg => !arg.startsWith('--'));
-  
+  const cliClientId = cliArgs.find((arg) => !arg.startsWith("--"));
+
   if (cliClientId) {
     logger.system(`Using CLIENT_ID from CLI: ${cliClientId}`);
     return cliClientId;
   }
-  
+
   if (process.env.CLIENT_ID) {
     logger.system(`Using CLIENT_ID from ENV: ${process.env.CLIENT_ID}`);
     return process.env.CLIENT_ID;
   }
-  
+
   logger.system(`Using default CLIENT_ID: core-dev`);
-  return 'core-dev';
+  return "core-dev";
 };
 
 /**
@@ -38,24 +38,28 @@ const getClientId = (): string => {
  */
 const getGPGPassphrase = (): string => {
   if (process.env.GPG_PASSPHRASE) {
-    logger.system('Using GPG passphrase from environment');
+    logger.system("Using GPG passphrase from environment");
     return process.env.GPG_PASSPHRASE;
   }
-  
-  const passphraseArg = process.argv.find(arg => arg.startsWith('--gpg-passphrase='));
+
+  const passphraseArg = process.argv.find((arg) =>
+    arg.startsWith("--gpg-passphrase=")
+  );
   if (passphraseArg) {
-    logger.system('Using GPG passphrase from CLI argument');
-    return passphraseArg.split('=')[1];
+    logger.system("Using GPG passphrase from CLI argument");
+    return passphraseArg.split("=")[1];
   }
-  
-  throw new Error('GPG passphrase not found. Set GPG_PASSPHRASE env var or use --gpg-passphrase=xxx');
+
+  throw new Error(
+    "GPG passphrase not found. Set GPG_PASSPHRASE env var or use --gpg-passphrase=xxx"
+  );
 };
 
 /**
  * Get SOPS binary path for Windows
  */
 const getSopsPath = (envsRepoPath: string): string => {
-  const winPath = path.join(envsRepoPath, 'tools/win64/sops.exe');
+  const winPath = path.join(envsRepoPath, "tools/win64/sops.exe");
   if (!fs.existsSync(winPath)) {
     throw new Error(`SOPS Windows binary not found at: ${winPath}`);
   }
@@ -65,181 +69,254 @@ const getSopsPath = (envsRepoPath: string): string => {
 /**
  * Decrypt SOPS file using spawn for better process control
  */
-const decryptSopsAsync = async (sopsPath: string, secretsPath: string, gpgPassphrase: string): Promise<string> => {
-  logger.system('🔐 Decrypting SOPS file...');
-  
+const decryptSopsAsync = async (
+  sopsPath: string,
+  secretsPath: string,
+  gpgPassphrase: string
+): Promise<string> => {
+  logger.system("🔐 Decrypting SOPS file...");
+
   return new Promise((resolve, reject) => {
-    const gnupgHome = process.env.GNUPGHOME || path.join(process.env.APPDATA!, 'gnupg');
-    
-    logger.debug('SOPS Environment details', {
+    const gnupgHome =
+      process.env.GNUPGHOME || path.join(process.env.APPDATA!, "gnupg");
+
+    logger.debug("SOPS Environment details", {
       sops_path: sopsPath,
       secrets_path: secretsPath,
       gnupg_home: gnupgHome,
       ...(logger.isVerbose() && {
         verbose_full_env: {
           GNUPGHOME: gnupgHome,
-          GPG_TTY: process.platform === 'win32' ? undefined : '/dev/null',
-          GPG_BATCH: '1'
-        }
-      })
-    });
-    
-    const sopsProcess = spawn(sopsPath, [
-      '-d', 
-      '--output-type', 
-      'json', 
-      secretsPath
-    ], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: { 
-        ...process.env,
-        GNUPGHOME: gnupgHome,
-        GPG_PASSPHRASE: gpgPassphrase,
-        GPG_TTY: process.platform === 'win32' ? undefined : '/dev/null',
-        GPG_BATCH: '1'
-      },
-      shell: true,
-      windowsHide: true
+          GPG_TTY: process.platform === "win32" ? undefined : "/dev/null",
+          GPG_BATCH: "1",
+        },
+      }),
     });
 
-    let stdout = '';
-    let stderr = '';
+    const sopsProcess = spawn(
+      sopsPath,
+      ["-d", "--output-type", "json", secretsPath],
+      {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: {
+          ...process.env,
+          GNUPGHOME: gnupgHome,
+          GPG_PASSPHRASE: gpgPassphrase,
+          GPG_TTY: process.platform === "win32" ? undefined : "/dev/null",
+          GPG_BATCH: "1",
+        },
+        shell: true,
+        windowsHide: true,
+      }
+    );
 
-    sopsProcess.stdout?.on('data', (data) => {
+    let stdout = "";
+    let stderr = "";
+
+    sopsProcess.stdout?.on("data", (data) => {
       stdout += data.toString();
     });
 
-    sopsProcess.stderr?.on('data', (data) => {
+    sopsProcess.stderr?.on("data", (data) => {
       stderr += data.toString();
     });
 
-    sopsProcess.on('close', (code) => {
+    sopsProcess.on("close", (code) => {
       if (code === 0) {
-        logger.system('SOPS decryption successful');
+        logger.system("SOPS decryption successful");
         resolve(stdout);
       } else {
-        logger.error('SOPS decryption failed', {
+        logger.error("SOPS decryption failed", {
           exit_code: code,
-          stderr: stderr
+          stderr: stderr,
         });
         reject(new Error(`SOPS decryption failed: ${stderr}`));
       }
     });
 
-    sopsProcess.on('error', (error) => {
-      logger.error('SOPS process error', {
-        error: error.message
+    sopsProcess.on("error", (error) => {
+      logger.error("SOPS process error", {
+        error: error.message,
       });
       reject(error);
     });
   });
 };
 
+// función helper al envConfig.ts
+const resolveServiceUrl = (
+  serviceName: string,
+  endpoint: string,
+  yamlConfig: any
+): string => {
+  const service = yamlConfig.services?.find((s: any) => s.name === serviceName);
+  if (!service) {
+    logger.warn(`Service ${serviceName} not found in configuration`);
+    return "";
+  }
+
+  // Para el host, manejar 0.0.0.0 y URLs completas
+  let host = service.host || "localhost";
+  if (host === "0.0.0.0") {
+    host = "localhost";
+  }
+
+  // Si el host ya incluye http/https, usarlo tal cual
+  const baseUrl = host.includes("://") ? host : `http://${host}`;
+
+  // Obtener el endpoint correcto
+  const endpointPath = service.endpoints?.[endpoint] || "";
+
+  return `${baseUrl}:${service.port}${endpointPath}`;
+};
+
 /**
  * Load configuration using SOPS only
  */
 const loadConfig = async () => {
-  console.log('🔧 Loading config via SOPS');
-  
+  console.log("🔧 Loading config via SOPS");
+
   const clientId = getClientId();
   const gpgPassphrase = getGPGPassphrase();
-  
-  const envsRepoPath = path.resolve(__dirname, '../../../core-envs-private');
-  
+
+  const envsRepoPath = path.resolve(__dirname, "../../../core-envs-private");
+
   if (!fs.existsSync(envsRepoPath)) {
     throw new Error(`core-envs-private repo not found at: ${envsRepoPath}`);
   }
-  
+
   console.log(`📂 Using repo: ${envsRepoPath}`);
-  
+
   try {
     // 1. Load config.yaml (NUEVA ESTRUCTURA)
     const yamlPath = path.join(envsRepoPath, `clients/${clientId}/config.yaml`);
-    const yamlFile = fs.readFileSync(yamlPath, 'utf8');
+    const yamlFile = fs.readFileSync(yamlPath, "utf8");
     const yamlParsed = yaml.load(yamlFile) as any;
-    
-    console.log('✅ config.yaml loaded with new structure');
-    
+
+    console.log("✅ config.yaml loaded with new structure");
+
     // 2. Decrypt secrets.sops.yaml
-    const secretsPath = path.join(envsRepoPath, `clients/${clientId}/secrets.sops.yaml`);
+    const secretsPath = path.join(
+      envsRepoPath,
+      `clients/${clientId}/secrets.sops.yaml`
+    );
     const sopsPath = getSopsPath(envsRepoPath);
-    const decryptOutput = await decryptSopsAsync(sopsPath, secretsPath, gpgPassphrase);
+    const decryptOutput = await decryptSopsAsync(
+      sopsPath,
+      secretsPath,
+      gpgPassphrase
+    );
     const secretsConfig = JSON.parse(decryptOutput);
-    
+
     // 3. 🔥 NUEVO MAPEO PARA ARRAYS
-    const coreServicesConfig = yamlParsed.services?.find((s: any) => s.name === 'core-services');
-    const coreBackendConfig = yamlParsed.services?.find((s: any) => s.name === 'core-backend');
-    const ms365Config = yamlParsed.external_services?.find((s: any) => s.name === 'ms365');
-    
+    const coreServicesConfig = yamlParsed.services?.find(
+      (s: any) => s.name === "core-services"
+    );
+    const coreBackendConfig = yamlParsed.services?.find(
+      (s: any) => s.name === "core-backend"
+    );
+    const ms365Config = yamlParsed.external_services?.find(
+      (s: any) => s.name === "ms365"
+    );
+
     // Buscar credenciales correspondientes
-    const coreServicesSecrets = secretsConfig.services?.find((s: any) => s.name === 'core-services')?.credentials || {};
-    const coreBackendSecrets = secretsConfig.services?.find((s: any) => s.name === 'core-backend')?.credentials || {};
-    const ms365Secrets = secretsConfig.external_services?.find((s: any) => s.name === 'ms365')?.credentials || {};
-    
+    const coreServicesSecrets =
+      secretsConfig.services?.find((s: any) => s.name === "core-services")
+        ?.credentials || {};
+    const coreBackendSecrets =
+      secretsConfig.services?.find((s: any) => s.name === "core-backend")
+        ?.credentials || {};
+    const ms365Secrets =
+      secretsConfig.external_services?.find((s: any) => s.name === "ms365")
+        ?.credentials || {};
+
     // 4. Construir config final con la nueva estructura
     const mergedConfig = {
       // Tenant info
-      tenantClientId: yamlParsed.tenant?.client_id || '',
-      tenantName: yamlParsed.tenant?.name || '',
-      environment: yamlParsed.tenant?.environment || 'development',
+      tenantClientId: yamlParsed.tenant?.client_id || "",
+      tenantName: yamlParsed.tenant?.name || "",
+      environment: yamlParsed.tenant?.environment || "development",
       // Hot reload configuration
-      configReloadIntervalMinutes: yamlParsed.tenant?.config_reload_interval_minutes || 0,
-      
+      configReloadIntervalMinutes:
+        yamlParsed.tenant?.config_reload_interval_minutes || 0,
+
       // Core Services config
-      coreApiHost: coreServicesConfig?.host || 'http://localhost',
+      coreApiHost: coreServicesConfig?.host || "http://localhost",
       servicesPort: coreServicesConfig?.port || 3001,
-      authUrl: coreServicesConfig?.endpoints?.auth || '/auth/login',      
-      
-      // Backend config  
+      authUrl: coreServicesConfig?.endpoints?.auth || "/auth/login",
+
+      // Backend config
       backendPort: coreBackendConfig?.port || 3000,
-      backendUrl: coreBackendConfig?.api_url || '',
-      
+      backendUrl: coreBackendConfig?.api_url || "",
+
       // Database config (from core-backend)
-      pg_host: coreBackendConfig?.database?.host || 'localhost',
+      pg_host: coreBackendConfig?.database?.host || "localhost",
       pg_port: coreBackendConfig?.database?.port || 5432,
-      pg_database: coreBackendConfig?.database?.name || 'core_dev',
+      pg_database: coreBackendConfig?.database?.name || "core_dev",
       pg_ssl: coreBackendConfig?.database?.ssl?.enabled || true,
       pg_min_connections: coreBackendConfig?.database?.pool?.min || 2,
       pg_max_connections: coreBackendConfig?.database?.pool?.max || 20,
-      
+
       // MS365 / Email config
-      senderEmail: ms365Secrets.sender_email || '',
-      clientId: ms365Secrets.client_id || '',
-      clientSecret: ms365Secrets.client_secret || '',
-      tenantId: ms365Secrets.tenant_id || '',
-      refreshToken: ms365Secrets.refresh_token || '',
-      tokenEndpoint: ms365Config?.endpoints?.token || 'https://login.microsoftonline.com',
-      
+      senderEmail: ms365Secrets.sender_email || "",
+      clientId: ms365Secrets.client_id || "",
+      clientSecret: ms365Secrets.client_secret || "",
+      tenantId: ms365Secrets.tenant_id || "",
+      refreshToken: ms365Secrets.refresh_token || "",
+      tokenEndpoint:
+        ms365Config?.endpoints?.token || "https://login.microsoftonline.com",
+
       // Auth credentials
-      jwtSecret: coreServicesSecrets.jwt_secret || '',
-      internalJwtSecret: coreServicesSecrets.internal_jwt_secret || '',
-      authUsername: coreServicesSecrets.auth?.username || '',
-      authPassword: coreServicesSecrets.auth?.password || '',
-      
+      jwtSecret: coreServicesSecrets.jwt_secret || "",
+      internalJwtSecret: coreServicesSecrets.internal_jwt_secret || "",
+      authUsername: coreServicesSecrets.auth?.username || "",
+      authPassword: coreServicesSecrets.auth?.password || "",
+
       // PDF signing
-      certPdfSignPath: coreServicesConfig?.certificates?.pdf_signing?.path || '',
-      certPdfSignType: coreServicesConfig?.certificates?.pdf_signing?.type || 'p12',
-      certPdfSignPassword: coreServicesSecrets.certificates?.pdf_signing_password || '',
-      
+      certPdfSignPath:
+        coreServicesConfig?.certificates?.pdf_signing?.path || "",
+      certPdfSignType:
+        coreServicesConfig?.certificates?.pdf_signing?.type || "p12",
+      certPdfSignPassword:
+        coreServicesSecrets.certificates?.pdf_signing_password || "",
+
       // Browser pool
       maxBrowsers: coreServicesConfig?.browser_pool?.max_browsers || 1,
-      maxPagesPerBrowser: coreServicesConfig?.browser_pool?.pdf_generation?.max_pages_per_browser || 2,
-      pageIdleTimeout: coreServicesConfig?.browser_pool?.pdf_generation?.page_idle_timeout || 60000,
-      
+      maxPagesPerBrowser:
+        coreServicesConfig?.browser_pool?.pdf_generation
+          ?.max_pages_per_browser || 2,
+      pageIdleTimeout:
+        coreServicesConfig?.browser_pool?.pdf_generation?.page_idle_timeout ||
+        60000,
+
       // Build URLs
       apiUrl: `${coreServicesConfig?.host}:${coreServicesConfig?.port}/api`,
-      authFullUrl: `${coreServicesConfig?.host}:${coreServicesConfig?.port}${coreServicesConfig?.endpoints?.auth}`,
-      
+      //authFullUrl: `${coreServicesConfig?.host}:${coreServicesConfig?.port}${coreServicesConfig?.endpoints?.auth}`,
+      authFullUrl: resolveServiceUrl("core-backend", "auth", yamlParsed), // 🔥 Usar la función helper
+      backendAuthUrl: resolveServiceUrl("core-backend", "auth", yamlParsed),
+      backendHealthUrl: resolveServiceUrl(
+        "core-backend",
+        "health_check",
+        yamlParsed
+      ),
+      backendApiUrl: resolveServiceUrl("core-backend", "api", yamlParsed),
+      backendHeartbeatUrl:
+        resolveServiceUrl("core-backend", "heartbeat", yamlParsed) ||
+        `http://localhost:${coreBackendConfig?.port || 3000}/api/heartbeat`,
+
+      // Función helper para resolver URLs dinámicamente
+      resolveServiceUrl: (serviceName: string, endpoint: string) =>
+        resolveServiceUrl(serviceName, endpoint, yamlParsed),
+
       // Metadata
-      config_source: 'SOPS_ARRAY_STRUCTURE'
+      config_source: "SOPS_ARRAY_STRUCTURE",
     };
-    
-    console.log('✅ Config loaded with new array structure');
-    
+
+    console.log("✅ Config loaded with new array structure");
+
     return mergedConfig;
-    
   } catch (error) {
-    console.error('❌ Config loading failed:', (error as Error).message);
+    console.error("❌ Config loading failed:", (error as Error).message);
     throw error;
   }
 };
