@@ -1,6 +1,8 @@
-// src/app.ts - FIXED: Dynamic host configuration
+// src/app.ts - LIMPIO Y ORDENADO
 import express from "express";
 import helmet from "helmet";
+import path from "path"; // 🔥 FALTABA
+import fs from "fs";
 import { getConfigAsync } from "./config/envConfig";
 import { validateConfig } from "./config/config-validator";
 import { initServiceContainer } from "./services/serviceContainer";
@@ -13,54 +15,57 @@ import zplRoutes from "./services/zpl/routes";
 import logger from "./utils/logging";
 import gdprRoutes from "./routes/gdprRoutes";
 import { initGDPRService } from "./services/gdpr/gdprTokenService";
+import { FileWatcher } from "./config/FileWatcher";
+import { initServerMonitoring } from "./services/monitoring/ServerMonitoringService"; // 🔥 FALTABA
 
 const startApp = async () => {
   const config = await getConfigAsync();
-  logger.system("Config loaded successfully", {
-    config_source: config.config_source || 'unknown',
-    has_required_fields: !!(config.clientId && config.senderEmail && config.jwtSecret)
-  });
 
-  // log to verify config structure
+  // Un solo log de config
   logger.system("Config loaded successfully", {
-    config_source: config.config_source || 'unknown',
-    config_structure: config.config_source === 'SOPS_ARRAY_STRUCTURE' ? 'NEW_ARRAYS' : 'LEGACY',
+    config_source: config.config_source || "unknown",
+    config_structure:
+      config.config_source === "SOPS_ARRAY_STRUCTURE" ? "NEW_ARRAYS" : "LEGACY",
     tenant_id: config.tenantClientId,
     tenant_name: config.tenantName,
     environment: config.environment,
-    has_required_fields: !!(config.clientId && config.senderEmail && config.jwtSecret)
+    has_required_fields: !!(
+      config.clientId &&
+      config.senderEmail &&
+      config.jwtSecret
+    ),
   });
 
   validateConfig(config);
   logger.system("Config validation passed", {
-    validated_fields: ['clientId', 'clientSecret', 'tenantId', 'senderEmail'],
-    config_mode: config.config_source
+    validated_fields: ["clientId", "clientSecret", "tenantId", "senderEmail"],
+    config_mode: config.config_source,
   });
 
   await initServiceContainer(config);
   logger.container("Service container initialized successfully", {
     email_config: !!config.senderEmail,
     pdf_config: !!config.certPdfSignPath,
-    jwt_config: !!config.jwtSecret
+    jwt_config: !!config.jwtSecret,
   });
 
   // After initServiceContainer:
   initGDPRService();
   logger.system("GDPR service initialized", {
-    default_token_expiry: '24 hours',
-    cleanup_interval: '1 hour'
+    default_token_expiry: "24 hours",
+    cleanup_interval: "1 hour",
   });
 
   logger.startMetrics(30000); // Start metrics collection every 30 seconds
   logger.system("Metrics collection started", {
     interval_ms: 30000,
-    metrics_file: 'core-services-metrics-*.log'
+    metrics_file: "core-services-metrics-*.log",
   });
 
   // Create JWT middleware with loaded config
   const authenticateJWT = createAuthenticateJWT(config.jwtSecret);
   logger.auth("JWT middleware created", {
-    jwt_secret_length: config.jwtSecret?.length || 0
+    jwt_secret_length: config.jwtSecret?.length || 0,
   });
 
   const app = express();
@@ -83,29 +88,112 @@ const startApp = async () => {
   });
 
   logger.system("Express server configuration completed", {
-    routes: ['/auth', '/api/email', '/api/gdpr', '/generate-pdf', '/generate-zpl', '/health'],
-    middleware: ['helmet', 'express.json'],
-    authentication: 'DISABLED_FOR_TESTING'
+    routes: [
+      "/auth",
+      "/api/email",
+      "/api/gdpr",
+      "/generate-pdf",
+      "/generate-zpl",
+      "/health",
+    ],
+    middleware: ["helmet", "express.json"],
+    authentication: "DISABLED_FOR_TESTING",
   });
+
+  // 🔥 SECCIÓN DE MONITORING Y FILE WATCHING - LIMPIA Y ORDENADA 🔥
+
+  // 1. Inicializar Server Monitoring
+  const configPath = path.join(
+    path.resolve(__dirname, "../../core-envs-private"),
+    `clients/${config.tenantClientId || "core-dev"}/config.yaml`
+  );
+
+  // Añade estos logs ANTES de inicializar ServerMonitoring:
+  logger.system("Debug: Config path construction", {
+    __dirname,
+    resolved_path: path.resolve(__dirname, "../../core-envs-private"),
+    tenant_id: config.tenantClientId,
+    final_path: configPath,
+    exists: fs.existsSync(configPath),
+  });
+
+  const serverMonitoring = initServerMonitoring(configPath);
+  await serverMonitoring.loadServers();
+  logger.system("Server monitoring service initialized", {
+    servers_count: serverMonitoring.getAllServers().length,
+  });
+
+  // 2. Configurar File Watcher (si está habilitado)
+  if (
+    config.configReloadIntervalMinutes &&
+    config.configReloadIntervalMinutes > 0
+  ) {
+    logger.system("Initializing configuration hot reload", {
+      interval_minutes: config.configReloadIntervalMinutes,
+      watched_files: ["config.yaml"],
+    });
+
+    const watcher = new FileWatcher({
+      intervalMinutes: config.configReloadIntervalMinutes,
+      files: [
+        {
+          name: "config",
+          path: configPath, // Reutilizamos la misma ruta
+          decrypt: false,
+        },
+      ],
+    });
+
+    // Manejar cambios
+    watcher.on("fileChanged", async (file, oldHash, newHash) => {
+      if (file.name === "config") {
+        logger.system(
+          "Configuration change detected, reloading server monitoring",
+          {
+            file: file.name,
+          }
+        );
+
+        try {
+          const { reloadServerMonitoring } = await import(
+            "./services/monitoring/ServerMonitoringService"
+          );
+          await reloadServerMonitoring();
+        } catch (error) {
+          logger.error("Failed to reload server monitoring", {
+            error: (error as Error).message,
+          });
+        }
+      }
+    });
+
+    await watcher.start();
+
+    // Guardar referencia global para cleanup
+    (global as any).configWatcher = watcher;
+  } else {
+    logger.system("Configuration hot reload disabled", {
+      reason: "config_reload_interval_minutes not set or is 0",
+    });
+  }
+
+  // 🔥 FIN DE MONITORING 🔥
 
   // FIXED: Dynamic host and port configuration
   const PORT = config.servicesPort || 3001;
-  const HOST = process.env.HOST || '0.0.0.0'; // Default to listen on all interfaces
-  
-  // Build dynamic base URL for API endpoints
+  const HOST = process.env.HOST || "0.0.0.0";
+
   const getBaseUrl = () => {
-    // Priority: explicit config > environment > fallback
     if (config.coreApiHost) {
       return config.coreApiHost;
     }
-    
+
     if (process.env.API_BASE_URL) {
       return process.env.API_BASE_URL;
     }
-    
-    // Fallback for development
-    const protocol = process.env.NODE_ENV === 'production' ? 'https' : 'http';
-    const hostname = process.env.HOSTNAME || 'localhost';
+
+    const protocol = process.env.NODE_ENV === "production" ? "https" : "http";
+    const hostname = process.env.HOSTNAME || "localhost";
     return `${protocol}://${hostname}`;
   };
 
@@ -125,22 +213,26 @@ const startApp = async () => {
         email: `${fullApiUrl}/api/email/send-with-consent`,
         pdf: `${fullApiUrl}/generate-pdf`,
         zpl: `${fullApiUrl}/generate-zpl`,
-        gdpr: `${fullApiUrl}/api/gdpr/generate-token`
+        gdpr: `${fullApiUrl}/api/gdpr/generate-token`,
       },
       configuration: {
-        environment: process.env.NODE_ENV || 'development',
+        environment: process.env.NODE_ENV || "development",
         config_source: config.config_source,
-        api_host_from: config.coreApiHost ? 'config' : 
-                      process.env.API_BASE_URL ? 'env_API_BASE_URL' : 
-                      'fallback'
+        api_host_from: config.coreApiHost
+          ? "config"
+          : process.env.API_BASE_URL
+          ? "env_API_BASE_URL"
+          : "fallback",
+        hot_reload: !!config.configReloadIntervalMinutes,
       },
       features: [
-        'ISO 27001 compliant emails',
-        'PDF generation with signing',
-        'ZPL label generation',
-        'GDPR consent management'
-      ],
-      ready: true
+        "ISO 27001 compliant emails",
+        "PDF generation with signing",
+        "ZPL label generation",
+        "GDPR consent management",
+        config.configReloadIntervalMinutes ? "Hot config reload" : null,
+      ].filter(Boolean),
+      ready: true,
     });
   });
 };
@@ -148,15 +240,15 @@ const startApp = async () => {
 logger.system("Starting Core Services application", {
   node_version: process.version,
   platform: process.platform,
-  environment: process.env.NODE_ENV || 'development',
-  hostname: process.env.HOSTNAME || 'localhost',
-  host_binding: process.env.HOST || '0.0.0.0'
+  environment: process.env.NODE_ENV || "development",
+  hostname: process.env.HOSTNAME || "localhost",
+  host_binding: process.env.HOST || "0.0.0.0",
 });
 
-startApp().catch(error => {
+startApp().catch((error) => {
   logger.error("Failed to start Core Services application", {
     error: error.message,
-    stack: error.stack
+    stack: error.stack,
   });
   process.exit(1);
 });

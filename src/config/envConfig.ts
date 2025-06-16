@@ -182,11 +182,13 @@ const loadConfig = async () => {
       tenantClientId: yamlParsed.tenant?.client_id || '',
       tenantName: yamlParsed.tenant?.name || '',
       environment: yamlParsed.tenant?.environment || 'development',
+      // Hot reload configuration
+      configReloadIntervalMinutes: yamlParsed.tenant?.config_reload_interval_minutes || 0,
       
       // Core Services config
       coreApiHost: coreServicesConfig?.host || 'http://localhost',
       servicesPort: coreServicesConfig?.port || 3001,
-      authUrl: coreServicesConfig?.endpoints?.auth || '/auth/login',
+      authUrl: coreServicesConfig?.endpoints?.auth || '/auth/login',      
       
       // Backend config  
       backendPort: coreBackendConfig?.port || 3000,
