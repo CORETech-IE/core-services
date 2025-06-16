@@ -54,14 +54,22 @@ const getGPGPassphrase = (): string => {
 /**
  * Get SOPS binary path for Windows
  */
+/**
+ * Get SOPS binary path based on platform
+ */
 const getSopsPath = (envsRepoPath: string): string => {
+  // ?? EN LINUX: usar sops del sistema
+  if (process.platform === 'linux' || process.platform === 'darwin') {
+    return 'sops'; // Asume que está en el PATH
+  }
+  
+  // En Windows, buscar el .exe local
   const winPath = path.join(envsRepoPath, 'tools/win64/sops.exe');
   if (!fs.existsSync(winPath)) {
     throw new Error(`SOPS Windows binary not found at: ${winPath}`);
   }
   return winPath;
 };
-
 /**
  * Decrypt SOPS file using spawn for better process control
  */
@@ -69,7 +77,17 @@ const decryptSopsAsync = async (sopsPath: string, secretsPath: string, gpgPassph
   logger.system('🔐 Decrypting SOPS file...');
   
   return new Promise((resolve, reject) => {
-    const gnupgHome = process.env.GNUPGHOME || path.join(process.env.APPDATA!, 'gnupg');
+    //const gnupgHome = process.env.GNUPGHOME || path.join(process.env.APPDATA!, 'gnupg');
+
+    // ?? FIX: APPDATA no existe en Linux
+    let gnupgHome = process.env.GNUPGHOME;
+    if (!gnupgHome) {
+      if (process.platform === 'win32') { 
+        gnupgHome = path.join(process.env.APPDATA!, 'gnupg');
+      } else {
+        gnupgHome = path.join(process.env.HOME!, '.gnupg');
+      }
+    }
     
     logger.debug('SOPS Environment details', {
       sops_path: sopsPath,
@@ -143,8 +161,15 @@ const loadConfig = async () => {
   
   const clientId = getClientId();
   const gpgPassphrase = getGPGPassphrase();
+
+  // ?? DEBUG: Ver qué valor tiene __dirname
+  console.log('DEBUG __dirname:', __dirname);
+  console.log('DEBUG process.cwd():', process.cwd());
   
   const envsRepoPath = path.resolve(__dirname, '../../../core-envs-private');
+
+  // ?? DEBUG: Ver la ruta construida
+  console.log('DEBUG envsRepoPath:', envsRepoPath);
   
   if (!fs.existsSync(envsRepoPath)) {
     throw new Error(`core-envs-private repo not found at: ${envsRepoPath}`);
