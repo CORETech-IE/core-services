@@ -56,28 +56,22 @@ const getGPGPassphrase = (): string => {
 };
 
 /**
- * Get SOPS binary path for Windows
- */
-/**
  * Get SOPS binary path based on platform
  */
 const getSopsPath = (envsRepoPath: string): string => {
-<<<<<<< HEAD
-  const winPath = path.join(envsRepoPath, "tools/win64/sops.exe");
-=======
-  // ?? EN LINUX: usar sops del sistema
+  // 🔥 EN LINUX: usar sops del sistema
   if (process.platform === 'linux' || process.platform === 'darwin') {
     return 'sops'; // Asume que está en el PATH
   }
   
   // En Windows, buscar el .exe local
   const winPath = path.join(envsRepoPath, 'tools/win64/sops.exe');
->>>>>>> bff7ded27659199231fa6d57efabfaeb69590ad9
   if (!fs.existsSync(winPath)) {
     throw new Error(`SOPS Windows binary not found at: ${winPath}`);
   }
   return winPath;
 };
+
 /**
  * Decrypt SOPS file using spawn for better process control
  */
@@ -89,15 +83,7 @@ const decryptSopsAsync = async (
   logger.system("🔐 Decrypting SOPS file...");
 
   return new Promise((resolve, reject) => {
-<<<<<<< HEAD
-    const gnupgHome =
-      process.env.GNUPGHOME || path.join(process.env.APPDATA!, "gnupg");
-
-    logger.debug("SOPS Environment details", {
-=======
-    //const gnupgHome = process.env.GNUPGHOME || path.join(process.env.APPDATA!, 'gnupg');
-
-    // ?? FIX: APPDATA no existe en Linux
+    // 🔥 FIX: APPDATA no existe en Linux
     let gnupgHome = process.env.GNUPGHOME;
     if (!gnupgHome) {
       if (process.platform === 'win32') { 
@@ -108,7 +94,6 @@ const decryptSopsAsync = async (
     }
     
     logger.debug('SOPS Environment details', {
->>>>>>> bff7ded27659199231fa6d57efabfaeb69590ad9
       sops_path: sopsPath,
       secrets_path: secretsPath,
       gnupg_home: gnupgHome,
@@ -207,20 +192,8 @@ const loadConfig = async () => {
   const clientId = getClientId();
   const gpgPassphrase = getGPGPassphrase();
 
-<<<<<<< HEAD
   const envsRepoPath = path.resolve(__dirname, "../../../core-envs-private");
 
-=======
-  // ?? DEBUG: Ver qué valor tiene __dirname
-  console.log('DEBUG __dirname:', __dirname);
-  console.log('DEBUG process.cwd():', process.cwd());
-  
-  const envsRepoPath = path.resolve(__dirname, '../../../core-envs-private');
-
-  // ?? DEBUG: Ver la ruta construida
-  console.log('DEBUG envsRepoPath:', envsRepoPath);
-  
->>>>>>> bff7ded27659199231fa6d57efabfaeb69590ad9
   if (!fs.existsSync(envsRepoPath)) {
     throw new Error(`core-envs-private repo not found at: ${envsRepoPath}`);
   }
@@ -331,7 +304,6 @@ const loadConfig = async () => {
 
       // Build URLs
       apiUrl: `${coreServicesConfig?.host}:${coreServicesConfig?.port}/api`,
-      //authFullUrl: `${coreServicesConfig?.host}:${coreServicesConfig?.port}${coreServicesConfig?.endpoints?.auth}`,
       authFullUrl: resolveServiceUrl("core-backend", "auth", yamlParsed), // 🔥 Usar la función helper
       backendAuthUrl: resolveServiceUrl("core-backend", "auth", yamlParsed),
       backendHealthUrl: resolveServiceUrl(
