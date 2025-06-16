@@ -153,82 +153,86 @@ const loadConfig = async () => {
   console.log(`📂 Using repo: ${envsRepoPath}`);
   
   try {
-    // 1. Load config.yaml (public configuration)
+    // 1. Load config.yaml (NUEVA ESTRUCTURA)
     const yamlPath = path.join(envsRepoPath, `clients/${clientId}/config.yaml`);
-    if (!fs.existsSync(yamlPath)) {
-      throw new Error(`Client config.yaml not found: ${clientId}`);
-    }
-    
     const yamlFile = fs.readFileSync(yamlPath, 'utf8');
-    const yamlParsed = yaml.load(yamlFile) as Record<string, any>;
+    const yamlParsed = yaml.load(yamlFile) as any;
     
-    // Convert snake_case to camelCase for consistency
-    const yamlConfig = Object.entries(yamlParsed).reduce((acc, [key, value]) => {
-      const camelKey = key.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
-      acc[camelKey] = value;
-      return acc;
-    }, {} as Record<string, any>);
-    
-    console.log('✅ config.yaml loaded');
+    console.log('✅ config.yaml loaded with new structure');
     
     // 2. Decrypt secrets.sops.yaml
     const secretsPath = path.join(envsRepoPath, `clients/${clientId}/secrets.sops.yaml`);
-    if (!fs.existsSync(secretsPath)) {
-      throw new Error(`Client secrets.sops.yaml not found: ${clientId}`);
-    }
-    
-    console.log(`🔐 Decrypting secrets for: ${clientId}`);
-    
     const sopsPath = getSopsPath(envsRepoPath);
-    console.log(`🔧 Using SOPS: ${sopsPath}`);
-    
     const decryptOutput = await decryptSopsAsync(sopsPath, secretsPath, gpgPassphrase);
     const secretsConfig = JSON.parse(decryptOutput);
-    console.log('✅ Secrets decrypted successfully');
     
-    // 3. Merge configs with proper field mapping
+    // 3. 🔥 NUEVO MAPEO PARA ARRAYS
+    const coreServicesConfig = yamlParsed.services?.find((s: any) => s.name === 'core-services');
+    const coreBackendConfig = yamlParsed.services?.find((s: any) => s.name === 'core-backend');
+    const ms365Config = yamlParsed.external_services?.find((s: any) => s.name === 'ms365');
+    
+    // Buscar credenciales correspondientes
+    const coreServicesSecrets = secretsConfig.services?.find((s: any) => s.name === 'core-services')?.credentials || {};
+    const coreBackendSecrets = secretsConfig.services?.find((s: any) => s.name === 'core-backend')?.credentials || {};
+    const ms365Secrets = secretsConfig.external_services?.find((s: any) => s.name === 'ms365')?.credentials || {};
+    
+    // 4. Construir config final con la nueva estructura
     const mergedConfig = {
-      ...yamlConfig,
-      ...secretsConfig,
+      // Tenant info
+      tenantClientId: yamlParsed.tenant?.client_id || '',
+      tenantName: yamlParsed.tenant?.name || '',
+      environment: yamlParsed.tenant?.environment || 'development',
       
-      // Map snake_case to camelCase for key fields
-      senderEmail: secretsConfig.sender_email ?? yamlConfig.senderEmail ?? '',
-      clientId: secretsConfig.client_id ?? yamlConfig.clientId ?? '',
-      clientSecret: secretsConfig.client_secret ?? yamlConfig.clientSecret ?? '',
-      tenantId: secretsConfig.tenant_id ?? yamlConfig.tenantId ?? '',
-      refreshToken: secretsConfig.refresh_token ?? yamlConfig.refreshToken ?? '',
-      tenantClientId: secretsConfig.tenant_client_id ?? yamlConfig.tenantClientId ?? '',
-      tokenEndpoint: secretsConfig.token_endpoint ?? yamlConfig.tokenEndpoint ?? 'https://login.microsoftonline.com',
-      jwtSecret: secretsConfig.jwt_secret ?? yamlConfig.jwtSecret ?? '',
-      internalJwtSecret: secretsConfig.internal_jwt_secret ?? yamlConfig.internalJwtSecret ?? '',
-      authUsername: secretsConfig.auth_username ?? yamlConfig.authUsername,
-      authPassword: secretsConfig.auth_password ?? yamlConfig.authPassword,
+      // Core Services config
+      coreApiHost: coreServicesConfig?.host || 'http://localhost',
+      servicesPort: coreServicesConfig?.port || 3001,
+      authUrl: coreServicesConfig?.endpoints?.auth || '/auth/login',
       
-      // Browser Pool Configuration
-      maxBrowsers: yamlConfig.maxBrowsers ?? secretsConfig.max_browsers ?? 2,
-      maxPagesPerBrowser: yamlConfig.maxPagesPerBrowser ?? secretsConfig.max_pages_per_browser ?? 3,
-      pageIdleTimeout: yamlConfig.pageIdleTimeout ?? secretsConfig.page_idle_timeout ?? 300000,      
-
-      // Build URLs from config
-      coreApiHost: yamlConfig.coreApiHost ?? '',
-      servicesPort: yamlConfig.servicesPort ?? '',
-      authUrl: yamlConfig.authUrl ?? '',
-      backendUrl: yamlConfig.backendUrl ?? '',
-      apiUrl: `${yamlConfig.coreApiHost}:${yamlConfig.servicesPort}${yamlConfig.backendUrl}`,
-      authFullUrl: `${yamlConfig.coreApiHost}:${yamlConfig.servicesPort}${yamlConfig.authUrl}`,
+      // Backend config  
+      backendPort: coreBackendConfig?.port || 3000,
+      backendUrl: coreBackendConfig?.api_url || '',
       
-      // Certificate configuration
-      certPdfSignType: yamlConfig.certPdfSignType ?? 'p12',
-      certPdfSignPath: secretsConfig.cert_pdf_sign_path ?? yamlConfig.certPdfSignPath ?? '',
-      certPdfSignPassword: secretsConfig.cert_pdf_sign_password ?? yamlConfig.certPdfSignPassword ?? '',
-
+      // Database config (from core-backend)
+      pg_host: coreBackendConfig?.database?.host || 'localhost',
+      pg_port: coreBackendConfig?.database?.port || 5432,
+      pg_database: coreBackendConfig?.database?.name || 'core_dev',
+      pg_ssl: coreBackendConfig?.database?.ssl?.enabled || true,
+      pg_min_connections: coreBackendConfig?.database?.pool?.min || 2,
+      pg_max_connections: coreBackendConfig?.database?.pool?.max || 20,
       
+      // MS365 / Email config
+      senderEmail: ms365Secrets.sender_email || '',
+      clientId: ms365Secrets.client_id || '',
+      clientSecret: ms365Secrets.client_secret || '',
+      tenantId: ms365Secrets.tenant_id || '',
+      refreshToken: ms365Secrets.refresh_token || '',
+      tokenEndpoint: ms365Config?.endpoints?.token || 'https://login.microsoftonline.com',
+      
+      // Auth credentials
+      jwtSecret: coreServicesSecrets.jwt_secret || '',
+      internalJwtSecret: coreServicesSecrets.internal_jwt_secret || '',
+      authUsername: coreServicesSecrets.auth?.username || '',
+      authPassword: coreServicesSecrets.auth?.password || '',
+      
+      // PDF signing
+      certPdfSignPath: coreServicesConfig?.certificates?.pdf_signing?.path || '',
+      certPdfSignType: coreServicesConfig?.certificates?.pdf_signing?.type || 'p12',
+      certPdfSignPassword: coreServicesSecrets.certificates?.pdf_signing_password || '',
+      
+      // Browser pool
+      maxBrowsers: coreServicesConfig?.browser_pool?.max_browsers || 1,
+      maxPagesPerBrowser: coreServicesConfig?.browser_pool?.pdf_generation?.max_pages_per_browser || 2,
+      pageIdleTimeout: coreServicesConfig?.browser_pool?.pdf_generation?.page_idle_timeout || 60000,
+      
+      // Build URLs
+      apiUrl: `${coreServicesConfig?.host}:${coreServicesConfig?.port}/api`,
+      authFullUrl: `${coreServicesConfig?.host}:${coreServicesConfig?.port}${coreServicesConfig?.endpoints?.auth}`,
       
       // Metadata
-      config_source: 'SOPS_ONLY'
+      config_source: 'SOPS_ARRAY_STRUCTURE'
     };
     
-    console.log('✅ Config loaded successfully via SOPS');
+    console.log('✅ Config loaded with new array structure');
     
     return mergedConfig;
     

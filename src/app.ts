@@ -21,6 +21,16 @@ const startApp = async () => {
     has_required_fields: !!(config.clientId && config.senderEmail && config.jwtSecret)
   });
 
+  // log to verify config structure
+  logger.system("Config loaded successfully", {
+    config_source: config.config_source || 'unknown',
+    config_structure: config.config_source === 'SOPS_ARRAY_STRUCTURE' ? 'NEW_ARRAYS' : 'LEGACY',
+    tenant_id: config.tenantClientId,
+    tenant_name: config.tenantName,
+    environment: config.environment,
+    has_required_fields: !!(config.clientId && config.senderEmail && config.jwtSecret)
+  });
+
   validateConfig(config);
   logger.system("Config validation passed", {
     validated_fields: ['clientId', 'clientSecret', 'tenantId', 'senderEmail'],
