@@ -145,7 +145,7 @@ export class HeartbeatService {
 
       // Enviar al backend
       const response = await axios.post(
-        `${this.backendUrl}/api/monitoring/heartbeat`,
+        `${this.backendUrl}/api/heartbeat`,
         heartbeatData,
         {
           headers: {
