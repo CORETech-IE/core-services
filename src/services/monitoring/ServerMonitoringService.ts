@@ -174,6 +174,8 @@ class ServerMonitoringService {
           this.initHeartbeatService();
         }
 
+        console.log(myServerConfig.name + ' + ' + myServerConfig.hostname + ' + ' + interval);
+
         await this.heartbeatService!.startHeartbeat(
           myServerConfig.name,
           myServerConfig.hostname,

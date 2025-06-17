@@ -69,6 +69,7 @@ export class HeartbeatService {
     this.intervalConfigs.set(serverName, intervalSeconds);
 
     // Enviar primer heartbeat inmediatamente
+    console.log(serverName + ' + ' + hostname);
     await this.sendHeartbeat(serverName, hostname);
 
     // Configurar intervalo USANDO intervalMs LOCAL
@@ -113,32 +114,22 @@ export class HeartbeatService {
 
     try {
       // Construir datos del heartbeat
-      const heartbeatData: HeartbeatData = {
-        server_name: serverName,
-        hostname,
-        timestamp: new Date().toISOString(),
-        status: "healthy",
-        system_info: {
-          platform: os.platform(),
-          uptime: os.uptime(),
-          memory: {
-            total: os.totalmem(),
-            free: os.freemem(),
-            used_percent:
-              ((os.totalmem() - os.freemem()) / os.totalmem()) * 100,
-          },
-          cpu: {
-            cores: os.cpus().length,
-            load_average: os.loadavg(), // Solo en Unix
-          },
-        },
-        service_info: {
-          name: "core-services",
-          version: process.env.npm_package_version || "1.0.0",
-          uptime: process.uptime(),
-          environment: process.env.NODE_ENV || "development",
-        },
-      };
+      const heartbeatData = {
+  client_id: serverName,  // Cambiar de server_name a client_id
+  service: "core-services",
+  timestamp: new Date().toISOString(),
+  status: "OK",  // Cambiar de "healthy" a "OK"
+  metadata: {
+    uptime_sec: Math.floor(process.uptime()),
+    version: process.env.npm_package_version || "1.0.0",
+    pid: process.pid,
+    hostname: hostname,
+    env: process.env.NODE_ENV || "development",
+    health_check_passed: true,
+    free_mem_mb: Math.round(os.freemem() / 1024 / 1024),
+    load_avg_1min: os.loadavg()[0] || 0
+  }
+};
 
       // Obtener token JWT
       const token = await getAuthToken();
